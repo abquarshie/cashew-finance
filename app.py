@@ -10,92 +10,100 @@ import streamlit as st
 # ----------------------------------------------------------------------------
 # Config
 # ----------------------------------------------------------------------------
-CURRENCY = "$"  # change to "GH₵", "€", etc.
+CURRENCY = "GH₵"
 
-INK = "#14212B"
-MUTED = "#6B7C85"
-LINE = "#E3E9E7"
-GREEN = "#16875A"
-CORAL = "#D6453D"
-AMBER = "#E0A030"
-CAT_COLORS = ["#0F766E", "#E4572E", "#F2A541", "#3D5A80", "#7A9E7E", "#B56576", "#8D99AE", "#6D597A"]
+GREEN = "#1FA971"
+CORAL = "#E4574F"
+TEAL = "#14A38F"
+CAT_COLORS = ["#14A38F", "#E4572E", "#F2A541", "#5B8DEF", "#8DBF8B", "#D17A93", "#9FB0C3", "#A58BC9"]
 
 DEFAULT_CATEGORIES = ["Food & Dining", "Rent & Housing", "Utilities", "Transport", "Entertainment", "Salary", "Other"]
+SHARED = "Household"  # used when a transaction isn't tied to one family member
 
-st.set_page_config(page_title="Cashew Finance", page_icon="💰", layout="wide")
+st.set_page_config(page_title="Cashew Finance", page_icon="💰", layout="wide", initial_sidebar_state="expanded")
 
 # ----------------------------------------------------------------------------
-# Styling
+# Styling (light / dark / follows system)
 # ----------------------------------------------------------------------------
-st.markdown(
-    f"""
+LIGHT_VARS = "--muted:#5F7079;--line:#DDE5E2;--card:#FFFFFF;--bar:#E4EBE8;--hover:#EAF1EE;--checked:#DCEEE8;"
+DARK_VARS = "--muted:#9AA9B1;--line:#2C373C;--card:#161D21;--bar:#2A3438;--hover:#1D272B;--checked:#16332F;"
+
+try:  # Streamlit 1.46+ reports the active theme; older versions fall back to the OS setting
+    theme_type = st.context.theme.type
+except Exception:
+    theme_type = None
+
+if theme_type == "dark":
+    ROOT_CSS = f":root{{{DARK_VARS}}}"
+elif theme_type == "light":
+    ROOT_CSS = f":root{{{LIGHT_VARS}}}"
+else:
+    ROOT_CSS = f":root{{{LIGHT_VARS}}} @media (prefers-color-scheme: dark){{:root{{{DARK_VARS}}}}}"
+
+APP_CSS = """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap');
+/*ROOT*/
 
 .stApp, .stApp p, .stApp label, .stApp h1, .stApp h2, .stApp h3, .stApp h4,
-.stApp input, .stApp textarea, .stApp button, .stApp li {{ font-family: 'Manrope', sans-serif; }}
-.stApp {{ background: #F5F7F6; color: {INK}; }}
-#MainMenu, footer {{ visibility: hidden; }}
-header[data-testid="stHeader"] {{ background: transparent; }}
-.block-container {{ padding-top: 2rem; max-width: 1200px; }}
+.stApp input, .stApp textarea, .stApp button, .stApp li { font-family: 'Manrope', sans-serif; }
+footer { visibility: hidden; }
+header[data-testid="stHeader"] { background: transparent; }
+.block-container { padding-top: 2rem; max-width: 1200px; }
 
-section[data-testid="stSidebar"] {{ background: #FFFFFF; border-right: 1px solid {LINE}; }}
-section[data-testid="stSidebar"] div[role="radiogroup"] {{ gap: 2px; }}
-section[data-testid="stSidebar"] div[role="radiogroup"] label {{
-    padding: 0.55rem 0.8rem; border-radius: 10px; width: 100%;
-}}
-section[data-testid="stSidebar"] div[role="radiogroup"] label:hover {{ background: #F0F5F3; }}
-section[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked) {{
-    background: #E3F1ED; font-weight: 700;
-}}
-.brand {{ font-size: 1.35rem; font-weight: 800; letter-spacing: -0.02em; margin-bottom: 0.1rem; }}
-.brand-sub {{ color: {MUTED}; font-size: 0.85rem; margin-bottom: 1.2rem; }}
+/* keep the hide / show sidebar arrows easy to find */
+[data-testid="stSidebarCollapseButton"] { opacity: 1 !important; visibility: visible !important; }
 
-.page-title {{ font-size: 1.9rem; font-weight: 800; letter-spacing: -0.03em; margin: 0; line-height: 1.2; }}
-.page-sub {{ color: {MUTED}; font-size: 0.95rem; margin: 0.15rem 0 1.2rem 0; }}
-.section-title {{ font-size: 1.05rem; font-weight: 700; margin: 0.2rem 0 0.6rem 0; }}
+section[data-testid="stSidebar"] { border-right: 1px solid var(--line); }
+section[data-testid="stSidebar"] div[role="radiogroup"] { gap: 2px; }
+section[data-testid="stSidebar"] div[role="radiogroup"] label { padding: 0.55rem 0.8rem; border-radius: 10px; width: 100%; }
+section[data-testid="stSidebar"] div[role="radiogroup"] label:hover { background: var(--hover); }
+section[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked) { background: var(--checked); font-weight: 700; }
+.brand { font-size: 1.35rem; font-weight: 800; letter-spacing: -0.02em; margin-bottom: 0.1rem; }
+.brand-sub { color: var(--muted); font-size: 0.85rem; margin-bottom: 1.2rem; }
 
-.kpi {{ background: #FFFFFF; border: 1px solid {LINE}; border-radius: 14px; padding: 1.1rem 1.25rem; height: 100%; }}
-.kpi-label {{ color: {MUTED}; font-size: 0.85rem; font-weight: 600; }}
-.kpi-value {{ font-size: 1.75rem; font-weight: 800; letter-spacing: -0.02em; margin: 0.15rem 0; }}
-.kpi-sub {{ font-size: 0.8rem; font-weight: 600; color: {MUTED}; }}
-.kpi-sub.good {{ color: {GREEN}; }}
-.kpi-sub.bad {{ color: {CORAL}; }}
-.kpi.featured {{ background: #0F3D3A; border-color: #0F3D3A; }}
-.kpi.featured .kpi-label {{ color: #A8CFC8; }}
-.kpi.featured .kpi-value {{ color: #FFFFFF; }}
-.kpi.featured .kpi-sub {{ color: #A8CFC8; }}
-.kpi.featured .kpi-sub.good {{ color: #7EE0B5; }}
-.kpi.featured .kpi-sub.bad {{ color: #FFB4A8; }}
+.page-title { font-size: 1.9rem; font-weight: 800; letter-spacing: -0.03em; margin: 0; line-height: 1.2; }
+.page-sub { color: var(--muted); font-size: 0.95rem; margin: 0.15rem 0 1.2rem 0; }
+.section-title { font-size: 1.05rem; font-weight: 700; margin: 0.2rem 0 0.6rem 0; }
 
-.budget-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 0.9rem 1.6rem; }}
-.budget-head {{ display: flex; justify-content: space-between; font-size: 0.92rem; margin-bottom: 0.35rem; }}
-.budget-name {{ font-weight: 700; }}
-.budget-amt {{ color: {MUTED}; }}
-.bar {{ background: #E8EEEC; height: 9px; border-radius: 999px; overflow: hidden; }}
-.fill {{ height: 100%; border-radius: 999px; }}
-.fill.ok {{ background: {GREEN}; }}
-.fill.warn {{ background: {AMBER}; }}
-.fill.over {{ background: {CORAL}; }}
-.budget-foot {{ font-size: 0.78rem; margin-top: 0.3rem; color: {MUTED}; }}
-.budget-foot.over {{ color: {CORAL}; font-weight: 700; }}
+.kpi { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 1.1rem 1.25rem; height: 100%; }
+.kpi-label { color: var(--muted); font-size: 0.85rem; font-weight: 600; }
+.kpi-value { font-size: 1.6rem; font-weight: 800; letter-spacing: -0.02em; margin: 0.15rem 0; color: inherit; }
+.kpi-sub { font-size: 0.8rem; font-weight: 600; color: var(--muted); }
+.kpi-sub.good { color: #1FA971; }
+.kpi-sub.bad { color: #E4574F; }
+.kpi.featured { background: #0F3D3A; border-color: #0F3D3A; }
+.kpi.featured .kpi-label, .kpi.featured .kpi-sub { color: #A8CFC8; }
+.kpi.featured .kpi-value { color: #FFFFFF; }
+.kpi.featured .kpi-sub.good { color: #7EE0B5; }
+.kpi.featured .kpi-sub.bad { color: #FFB4A8; }
 
-.recent-row {{ display: flex; justify-content: space-between; align-items: center;
-    padding: 0.65rem 0; border-bottom: 1px solid {LINE}; }}
-.recent-row:last-child {{ border-bottom: none; }}
-.recent-cat {{ font-weight: 700; font-size: 0.92rem; }}
-.recent-meta {{ color: {MUTED}; font-size: 0.8rem; }}
-.amt {{ font-weight: 700; }}
-.amt.income {{ color: {GREEN}; }}
-.amt.expense {{ color: {CORAL}; }}
+.budget-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 0.9rem 1.6rem; }
+.budget-head { display: flex; justify-content: space-between; gap: 0.5rem; font-size: 0.92rem; margin-bottom: 0.35rem; }
+.budget-name { font-weight: 700; }
+.budget-amt { color: var(--muted); }
+.bar { background: var(--bar); height: 9px; border-radius: 999px; overflow: hidden; }
+.fill { height: 100%; border-radius: 999px; }
+.fill.ok { background: #1FA971; }
+.fill.warn { background: #E0A030; }
+.fill.over { background: #E4574F; }
+.budget-foot { font-size: 0.78rem; margin-top: 0.3rem; color: var(--muted); }
+.budget-foot.over { color: #E4574F; font-weight: 700; }
 
-div.stButton > button, div.stDownloadButton > button, button[kind="secondaryFormSubmit"], button[kind="primaryFormSubmit"] {{
-    border-radius: 10px; font-weight: 600;
-}}
+.recent-row { display: flex; justify-content: space-between; align-items: center; padding: 0.65rem 0; border-bottom: 1px solid var(--line); }
+.recent-row:last-child { border-bottom: none; }
+.recent-cat { font-weight: 700; font-size: 0.92rem; }
+.recent-meta { color: var(--muted); font-size: 0.8rem; }
+.amt { font-weight: 700; }
+.amt.income { color: #1FA971; }
+.amt.expense { color: #E4574F; }
+
+div.stButton > button, div.stDownloadButton > button,
+button[kind="secondaryFormSubmit"], button[kind="primaryFormSubmit"] { border-radius: 10px; font-weight: 600; }
 </style>
-""",
-    unsafe_allow_html=True,
-)
+"""
+st.markdown(APP_CSS.replace("/*ROOT*/", ROOT_CSS), unsafe_allow_html=True)
+
 
 # ----------------------------------------------------------------------------
 # Database
@@ -145,6 +153,29 @@ def init_db():
             );
             """
         )
+        # Family member on each transaction (existing rows stay untouched and show as Household)
+        cur.execute("ALTER TABLE transactions ADD COLUMN IF NOT EXISTS member VARCHAR(50);")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS goals (
+                id SERIAL PRIMARY KEY,
+                name VARCHAR(80) NOT NULL,
+                target NUMERIC(12, 2) NOT NULL,
+                deadline DATE
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS goal_contributions (
+                id SERIAL PRIMARY KEY,
+                goal_id INTEGER NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
+                date DATE NOT NULL,
+                amount NUMERIC(12, 2) NOT NULL,
+                note TEXT
+            );
+            """
+        )
         cur.close()
     return True
 
@@ -155,18 +186,47 @@ init_db()
 def load_data():
     with db() as conn:
         df_t = pd.read_sql(
-            "SELECT id, date, type, category, amount, note FROM transactions ORDER BY date DESC, id DESC", conn
+            "SELECT id, date, type, category, amount, note, member FROM transactions ORDER BY date DESC, id DESC", conn
         )
         df_b = pd.read_sql("SELECT category, monthly_limit FROM budgets ORDER BY category", conn)
     df_t["amount"] = df_t["amount"].astype(float)
     df_t["note"] = df_t["note"].fillna("")
+    df_t["member"] = df_t["member"].fillna(SHARED)
     df_b["monthly_limit"] = df_b["monthly_limit"].astype(float)
     if not df_t.empty:
         df_t["date"] = pd.to_datetime(df_t["date"]).dt.date
     return df_t, df_b
 
 
+def load_goals():
+    with db() as conn:
+        goals = pd.read_sql(
+            """
+            SELECT g.id, g.name, g.target, g.deadline, COALESCE(SUM(c.amount), 0) AS saved
+            FROM goals g LEFT JOIN goal_contributions c ON c.goal_id = g.id
+            GROUP BY g.id, g.name, g.target, g.deadline
+            ORDER BY g.id
+            """,
+            conn,
+        )
+        contribs = pd.read_sql(
+            """
+            SELECT c.id, c.date, g.name AS goal, c.amount, c.note
+            FROM goal_contributions c JOIN goals g ON g.id = c.goal_id
+            ORDER BY c.date DESC, c.id DESC LIMIT 50
+            """,
+            conn,
+        )
+    goals["target"] = goals["target"].astype(float)
+    goals["saved"] = goals["saved"].astype(float)
+    contribs["amount"] = contribs["amount"].astype(float)
+    contribs["note"] = contribs["note"].fillna("")
+    return goals, contribs
+
+
 df_transactions, df_budgets = load_data()
+multi_member = (not df_transactions.empty) and df_transactions["member"].nunique() > 1
+
 
 # ----------------------------------------------------------------------------
 # Helpers
@@ -220,6 +280,16 @@ def kpi(label, value, sub="", tone="", featured=False):
     )
 
 
+def progress_item(name, right_text, pct, tone, foot, foot_over=False):
+    foot_cls = "budget-foot over" if foot_over else "budget-foot"
+    return (
+        f'<div><div class="budget-head"><span class="budget-name">{html.escape(name)}</span>'
+        f'<span class="budget-amt">{right_text}</span></div>'
+        f'<div class="bar"><div class="fill {tone}" style="width:{min(pct, 100):.1f}%"></div></div>'
+        f'<div class="{foot_cls}">{foot}</div></div>'
+    )
+
+
 def delta_vs_last(cur, prev, good_when_up=True):
     if prev == 0:
         return "No data last month", ""
@@ -238,6 +308,11 @@ def all_categories():
     return sorted(cats)
 
 
+def all_members():
+    others = set(df_transactions["member"].tolist()) - {SHARED} if not df_transactions.empty else set()
+    return [SHARED] + sorted(others)
+
+
 def tx_label(row):
     note = f" | {row['note']}" if row["note"] else ""
     return f"#{row['id']} | {row['date']:%d %b %Y} | {row['type']} | {row['category']} | {money(row['amount'])}{note}"
@@ -248,10 +323,14 @@ def recent_list_html(df, n=5):
     for _, r in df.head(n).iterrows():
         sign = "+" if r["type"] == "Income" else "−"
         cls = "income" if r["type"] == "Income" else "expense"
-        meta = f"{r['date']:%d %b}" + (f" · {html.escape(r['note'])}" if r["note"] else "")
+        parts = [f"{r['date']:%d %b}"]
+        if r["member"] != SHARED:
+            parts.append(html.escape(r["member"]))
+        if r["note"]:
+            parts.append(html.escape(r["note"]))
         rows.append(
             f'<div class="recent-row"><div><div class="recent-cat">{html.escape(r["category"])}</div>'
-            f'<div class="recent-meta">{meta}</div></div>'
+            f'<div class="recent-meta">{" · ".join(parts)}</div></div>'
             f'<div class="amt {cls}">{sign}{money(r["amount"])}</div></div>'
         )
     return "".join(rows)
@@ -264,11 +343,12 @@ NAV = {
     "Dashboard": "📊  Dashboard",
     "Add Transaction": "➕  Add Transaction",
     "Manage Budgets": "🎯  Budgets",
+    "Goals": "🏆  Savings Goals",
     "Manage / Delete": "🧾  Manage Transactions",
 }
 
 with st.sidebar:
-    st.markdown('<div class="brand">💰 Cashew</div><div class="brand-sub">Personal finance tracker</div>', unsafe_allow_html=True)
+    st.markdown('<div class="brand">💰 Cashew</div><div class="brand-sub">Family finance tracker</div>', unsafe_allow_html=True)
     menu = st.radio("Navigation", list(NAV.keys()), format_func=lambda k: NAV[k], label_visibility="collapsed")
 
 show_flash()
@@ -332,9 +412,7 @@ if menu == "Dashboard":
             with st.container(border=True):
                 section("Income vs expenses, last 6 months")
                 periods = pd.period_range(end=selected_period, periods=6, freq="M")
-                monthly = (
-                    df_transactions.groupby(["year_month", "type"])["amount"].sum().unstack(fill_value=0)
-                )
+                monthly = df_transactions.groupby(["year_month", "type"])["amount"].sum().unstack(fill_value=0)
                 for col in ("Income", "Expense"):
                     if col not in monthly.columns:
                         monthly[col] = 0.0
@@ -366,7 +444,6 @@ if menu == "Dashboard":
                     )
                     .properties(height=250)
                     .configure_view(strokeWidth=0)
-                    .configure_axis(gridColor="#EDF1EF", labelColor=MUTED, domainColor=LINE)
                 )
                 show_chart(trend_chart)
 
@@ -384,7 +461,7 @@ if menu == "Dashboard":
                 else:
                     donut = (
                         alt.Chart(spend)
-                        .mark_arc(innerRadius=62, outerRadius=105, stroke="#FFFFFF", strokeWidth=2)
+                        .mark_arc(innerRadius=62, outerRadius=105, padAngle=0.02)
                         .encode(
                             theta=alt.Theta("amount:Q", stack=True),
                             color=alt.Color(
@@ -407,6 +484,34 @@ if menu == "Dashboard":
                     share = top["amount"] / spend["amount"].sum() * 100
                     st.caption(f"{top['category']} is your biggest expense at {share:.0f}% of spending.")
 
+        # --- Spending by family member (only once more than one person is recorded) ---
+        if multi_member:
+            by_member = (
+                filtered_df[filtered_df["type"] == "Expense"]
+                .groupby("member", as_index=False)["amount"]
+                .sum()
+                .sort_values("amount", ascending=False)
+            )
+            if not by_member.empty:
+                st.write("")
+                with st.container(border=True):
+                    section("Spending by family member")
+                    member_chart = (
+                        alt.Chart(by_member)
+                        .mark_bar(cornerRadiusEnd=6, color=TEAL, size=18)
+                        .encode(
+                            y=alt.Y("member:N", sort="-x", axis=alt.Axis(title=None)),
+                            x=alt.X("amount:Q", axis=alt.Axis(title=None, format="~s")),
+                            tooltip=[
+                                alt.Tooltip("member:N", title="Who"),
+                                alt.Tooltip("amount:Q", title="Spent", format=",.2f"),
+                            ],
+                        )
+                        .properties(height=max(60, 38 * len(by_member)))
+                        .configure_view(strokeWidth=0)
+                    )
+                    show_chart(member_chart)
+
         # --- Budgets ------------------------------------------------------
         st.write("")
         with st.container(border=True):
@@ -428,31 +533,33 @@ if menu == "Dashboard":
                     pct = spent / limit * 100 if limit > 0 else 0.0
                     tone = "ok" if pct < 75 else ("warn" if pct < 100 else "over")
                     if spent > limit:
-                        foot = f'<div class="budget-foot over">⚠️ Over budget by {money(spent - limit)}</div>'
+                        foot, over = f"⚠️ Over budget by {money(spent - limit)}", True
                     else:
-                        foot = f'<div class="budget-foot">{money(limit - spent)} left · {pct:.0f}% used</div>'
-                    items.append(
-                        f'<div><div class="budget-head"><span class="budget-name">{html.escape(cat)}</span>'
-                        f'<span class="budget-amt">{money(spent)} of {money(limit)}</span></div>'
-                        f'<div class="bar"><div class="fill {tone}" style="width:{min(pct, 100):.1f}%"></div></div>'
-                        f"{foot}</div>"
-                    )
+                        foot, over = f"{money(limit - spent)} left · {pct:.0f}% used", False
+                    items.append(progress_item(cat, f"{money(spent)} of {money(limit)}", pct, tone, foot, over))
                 st.markdown(f'<div class="budget-grid">{"".join(items)}</div>', unsafe_allow_html=True)
 
         # --- Transactions -------------------------------------------------
         st.write("")
         with st.container(border=True):
             section(f"Transactions in {selected_period.strftime('%B %Y')}")
-            f1, f2, f3 = st.columns([1, 2, 2])
+            if multi_member:
+                f1, f2, f3, f4 = st.columns([1, 2, 1.3, 2])
+                member_filter = f3.selectbox("Family member", ["All"] + all_members())
+            else:
+                f1, f2, f4 = st.columns([1, 2, 2])
+                member_filter = "All"
             type_filter = f1.selectbox("Type", ["All", "Income", "Expense"])
             cat_filter = f2.multiselect("Category", sorted(filtered_df["category"].unique()))
-            query = f3.text_input("Search", placeholder="Search notes or categories")
+            query = f4.text_input("Search", placeholder="Search notes or categories")
 
             view = filtered_df
             if type_filter != "All":
                 view = view[view["type"] == type_filter]
             if cat_filter:
                 view = view[view["category"].isin(cat_filter)]
+            if member_filter != "All":
+                view = view[view["member"] == member_filter]
             if query:
                 view = view[
                     view["note"].str.contains(query, case=False, na=False)
@@ -460,12 +567,14 @@ if menu == "Dashboard":
                 ]
 
             st.caption(f"{len(view)} transaction{'s' if len(view) != 1 else ''}")
+            cols = ["date", "type", "category"] + (["member"] if multi_member else []) + ["note", "amount"]
             show_table(
-                view[["date", "type", "category", "note", "amount"]],
+                view[cols],
                 column_config={
                     "date": st.column_config.DateColumn("Date", format="DD MMM YYYY"),
                     "type": st.column_config.TextColumn("Type"),
                     "category": st.column_config.TextColumn("Category"),
+                    "member": st.column_config.TextColumn("Who"),
                     "note": st.column_config.TextColumn("Note"),
                     "amount": st.column_config.NumberColumn("Amount", format=f"{CURRENCY}%.2f"),
                 },
@@ -489,15 +598,20 @@ elif menu == "Add Transaction":
                 r3, r4 = st.columns(2)
                 t_category = r3.selectbox("Category", all_categories())
                 t_new_category = r4.text_input("Or new category", placeholder="Leave empty to use the one on the left")
+                r5, r6 = st.columns(2)
+                t_member = r5.selectbox("Family member", all_members(), help=f"{SHARED} means shared by everyone.")
+                t_new_member = r6.text_input("Or add a family member", placeholder="e.g. Ama")
                 t_note = st.text_input("Note / Description")
 
                 submitted = st.form_submit_button("Save transaction", type="primary")
 
                 if submitted:
                     final_category = t_new_category.strip() or t_category
+                    final_member = t_new_member.strip() or t_member
                     execute(
-                        "INSERT INTO transactions (date, type, category, amount, note) VALUES (%s, %s, %s, %s, %s)",
-                        (t_date, t_type, final_category, t_amount, t_note),
+                        "INSERT INTO transactions (date, type, category, amount, note, member) "
+                        "VALUES (%s, %s, %s, %s, %s, %s)",
+                        (t_date, t_type, final_category, t_amount, t_note, final_member),
                     )
                     flash(f"Saved {money(t_amount)} to {final_category}")
                     st.rerun()
@@ -561,6 +675,116 @@ elif menu == "Manage Budgets":
                         st.rerun()
 
 # ----------------------------------------------------------------------------
+# SAVINGS GOALS
+# ----------------------------------------------------------------------------
+elif menu == "Goals":
+    page_header("Savings goals", "Save together for school fees, rent, a car or anything else")
+    df_goals, df_contribs = load_goals()
+
+    with st.container(border=True):
+        section("Progress")
+        if df_goals.empty:
+            st.caption("No goals yet. Create your first one in the **New goal** tab below.")
+        else:
+            today = date.today()
+            items = []
+            for _, g in df_goals.iterrows():
+                target, saved = g["target"], g["saved"]
+                pct = saved / target * 100 if target > 0 else 0.0
+                remaining = max(target - saved, 0.0)
+                deadline = g["deadline"]
+                has_deadline = pd.notna(deadline)
+                if has_deadline:
+                    deadline = pd.to_datetime(deadline).date()
+
+                if saved >= target:
+                    foot = "🎉 Goal reached"
+                elif has_deadline:
+                    months_left = (deadline.year - today.year) * 12 + (deadline.month - today.month)
+                    if deadline < today:
+                        foot = f"Past its {deadline:%d %b %Y} date · {money(remaining)} still to go"
+                    else:
+                        per_month = remaining / max(months_left, 1)
+                        foot = f"{money(remaining)} to go · due {deadline:%d %b %Y} · about {money(per_month)} a month"
+                else:
+                    foot = f"{money(remaining)} to go · {pct:.0f}% saved"
+                items.append(progress_item(g["name"], f"{money(saved)} of {money(target)}", pct, "ok", foot))
+            st.markdown(f'<div class="budget-grid">{"".join(items)}</div>', unsafe_allow_html=True)
+
+    st.write("")
+    tab_add, tab_new, tab_manage = st.tabs(["Add money", "New goal", "History & manage"])
+
+    with tab_add:
+        if df_goals.empty:
+            st.caption("Create a goal first, then add money to it here.")
+        else:
+            with st.form("contribution_form", clear_on_submit=True):
+                goal_names = {int(r["id"]): r["name"] for _, r in df_goals.iterrows()}
+                k_goal = st.selectbox("Goal", list(goal_names.keys()), format_func=lambda i: goal_names[i])
+                k1, k2 = st.columns(2)
+                k_amount = k1.number_input(f"Amount ({CURRENCY})", min_value=0.01, format="%.2f")
+                k_date = k2.date_input("Date", value=date.today())
+                k_note = st.text_input("Note", placeholder="e.g. Ama's contribution")
+                if st.form_submit_button("Add to goal", type="primary"):
+                    execute(
+                        "INSERT INTO goal_contributions (goal_id, date, amount, note) VALUES (%s, %s, %s, %s)",
+                        (int(k_goal), k_date, k_amount, k_note),
+                    )
+                    flash(f"Added {money(k_amount)} to {goal_names[k_goal]}")
+                    st.rerun()
+            st.caption("Goal savings are tracked separately and don't change your income or expenses.")
+
+    with tab_new:
+        with st.form("goal_form", clear_on_submit=True):
+            n_name = st.text_input("Goal name", placeholder="e.g. School fees")
+            n1, n2 = st.columns(2)
+            n_target = n1.number_input(f"Target ({CURRENCY})", min_value=1.0, format="%.2f")
+            n_deadline = n2.date_input("Deadline (optional)", value=None)
+            if st.form_submit_button("Create goal", type="primary"):
+                if not n_name.strip():
+                    st.warning("Give the goal a name.")
+                else:
+                    execute(
+                        "INSERT INTO goals (name, target, deadline) VALUES (%s, %s, %s)",
+                        (n_name.strip(), n_target, n_deadline),
+                    )
+                    flash(f"Goal '{n_name.strip()}' created", "🏆")
+                    st.rerun()
+
+    with tab_manage:
+        if df_contribs.empty:
+            st.caption("No contributions yet.")
+        else:
+            show_table(
+                df_contribs[["date", "goal", "amount", "note"]],
+                column_config={
+                    "date": st.column_config.DateColumn("Date", format="DD MMM YYYY"),
+                    "goal": st.column_config.TextColumn("Goal"),
+                    "amount": st.column_config.NumberColumn("Amount", format=f"{CURRENCY}%.2f"),
+                    "note": st.column_config.TextColumn("Note"),
+                },
+            )
+            with st.expander("Remove a contribution"):
+                c_labels = {
+                    int(r["id"]): f"{r['date']:%d %b %Y} | {r['goal']} | {money(r['amount'])}"
+                    for _, r in df_contribs.iterrows()
+                }
+                c_pick = st.selectbox("Contribution", list(c_labels.keys()), format_func=lambda i: c_labels[i])
+                if st.button("Remove contribution"):
+                    execute("DELETE FROM goal_contributions WHERE id = %s", (int(c_pick),))
+                    flash("Contribution removed", "🗑️")
+                    st.rerun()
+        if not df_goals.empty:
+            with st.expander("Delete a goal"):
+                g_names = {int(r["id"]): r["name"] for _, r in df_goals.iterrows()}
+                g_pick = st.selectbox("Goal to delete", list(g_names.keys()), format_func=lambda i: g_names[i], key="goal_delete")
+                g_confirm = st.checkbox("Yes, delete this goal and its history")
+                if st.button("Delete goal", type="primary", disabled=not g_confirm):
+                    execute("DELETE FROM goals WHERE id = %s", (int(g_pick),))
+                    flash(f"Goal '{g_names[g_pick]}' deleted", "🗑️")
+                    st.rerun()
+
+# ----------------------------------------------------------------------------
 # MANAGE / DELETE TRANSACTIONS
 # ----------------------------------------------------------------------------
 elif menu == "Manage / Delete":
@@ -578,18 +802,20 @@ elif menu == "Manage / Delete":
             edit_id = st.selectbox("Select a transaction", ids, format_func=lambda i: labels[i], key="edit_select")
             row = df_transactions[df_transactions["id"] == edit_id].iloc[0]
             cats = all_categories()
+            members = all_members()
             with st.form(f"edit_form_{edit_id}"):
                 e1, e2 = st.columns(2)
                 e_date = e1.date_input("Date", value=row["date"])
                 e_amount = e2.number_input(f"Amount ({CURRENCY})", min_value=0.01, value=float(row["amount"]), format="%.2f")
-                e3, e4 = st.columns(2)
+                e3, e4, e5 = st.columns(3)
                 e_type = e3.selectbox("Type", ["Expense", "Income"], index=0 if row["type"] == "Expense" else 1)
                 e_category = e4.selectbox("Category", cats, index=cats.index(row["category"]))
+                e_member = e5.selectbox("Family member", members, index=members.index(row["member"]))
                 e_note = st.text_input("Note / Description", value=row["note"])
                 if st.form_submit_button("Save changes", type="primary"):
                     execute(
-                        "UPDATE transactions SET date=%s, type=%s, category=%s, amount=%s, note=%s WHERE id=%s",
-                        (e_date, e_type, e_category, e_amount, e_note, int(edit_id)),
+                        "UPDATE transactions SET date=%s, type=%s, category=%s, amount=%s, note=%s, member=%s WHERE id=%s",
+                        (e_date, e_type, e_category, e_amount, e_note, e_member, int(edit_id)),
                     )
                     flash(f"Updated transaction #{edit_id}")
                     st.rerun()
@@ -606,7 +832,7 @@ elif menu == "Manage / Delete":
 
         with tab_export:
             st.write(f"Download all {len(df_transactions)} transactions as a spreadsheet-friendly CSV.")
-            export_df = df_transactions[["id", "date", "type", "category", "amount", "note"]]
+            export_df = df_transactions[["id", "date", "type", "category", "member", "amount", "note"]]
             st.download_button(
                 "Download CSV",
                 export_df.to_csv(index=False).encode("utf-8"),
