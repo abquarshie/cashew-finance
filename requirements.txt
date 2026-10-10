@@ -1,3 +1,5 @@
-streamlit
+streamlit>=1.50
 pandas
+altair
+python-dateutil
 psycopg2-binary

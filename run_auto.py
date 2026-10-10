@@ -6,18 +6,17 @@ import sys
 import psycopg2
 
 from auto_rules import apply_recurring_rules
+from core.schema import ensure_schema
 
 
 def main():
     url = os.environ.get("DATABASE_URL")
     if not url:
         sys.exit("DATABASE_URL is not set.")
-    conn = psycopg2.connect(url)
+    conn = psycopg2.connect(url, connect_timeout=15)
     try:
+        ensure_schema(conn)  # brings older databases up to date, so this never needs the app opened first
         created = apply_recurring_rules(conn)
-    except (psycopg2.errors.UndefinedTable, psycopg2.errors.UndefinedColumn):
-        conn.rollback()
-        sys.exit("The database isn't ready yet. Open the app once so it can set itself up, then run this again.")
     finally:
         conn.close()
     print(f"Added {created} auto transaction(s).")
