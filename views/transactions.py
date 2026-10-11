@@ -11,7 +11,7 @@ from ui.nav import link
 
 EDIT_COLS = ["date", "category", "amount", "type", "account", "to_account", "member", "note"]
 NO_ACCOUNT = "—"
-TX_FIELDS = ["id", "date", "type", "category", "amount", "note", "member", "account", "to_account"]
+TX_FIELDS = ["id", "date", "type", "category", "amount", "note", "member", "account", "to_account", "created_by"]
 
 
 # ---- Add transaction page ------------------------------------------------------
@@ -21,13 +21,13 @@ def render_add():
     form_col, recent_col = st.columns([3, 2], gap="medium")
     with form_col:
         with card("add-form"):
-            entry_form(b, "p")
+            entry_form("p")
     with recent_col:
         with card("add-recent"):
             section("Latest entries")
             items = activity_items(b, limit=6)
             if items:
-                st.html(feed_html(items, show_who=b.multi_member))
+                st.html(feed_html(items, show_who=b.multi_member, names=b.name_of_user if len(b.users) > 1 else None))
             else:
                 empty("Your latest entries will show up here.")
         st.caption("Need a new category or account? Add it in **Categories & accounts**.")
@@ -215,6 +215,7 @@ def render():
                     r["id"] = int(r["id"])
                     r["account"] = r["account"] or None
                     r["to_account"] = r["to_account"] or None
+                    r["created_by"] = r["created_by"] or None
                 n = len(deletes)
                 undo = {"message": f"Deleted {n} transaction{'s' if n != 1 else ''}.", "rows": rows}
                 stmts = updates + [("DELETE FROM transactions WHERE id = ANY(%s)", ([int(i) for i in deletes],))]

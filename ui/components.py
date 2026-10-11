@@ -56,8 +56,8 @@ def kpi_html(label, value, sub="", featured=False):
     return f'<div class="{cls}"><div class="kpi-label">{esc(label)}</div><div class="kpi-value">{esc(value)}</div>{sub_html}</div>'
 
 
-def kpi_grid(cards):
-    st.html(f'<div class="kpi-grid">{"".join(cards)}</div>')
+def kpi_grid(cards, cls=""):
+    st.html(f'<div class="kpi-grid {cls}">{"".join(cards)}</div>')
 
 
 def change_pill(cur, prev, good_when_up=True):
@@ -116,15 +116,17 @@ def activity_items(book, limit=8):
         items.append({"date": r["date"], "id": r["id"], "kind": r["type"], "title": r["category"],
                       "amount": r["amount"], "account": r["account"], "to": r["to_account"],
                       "who": r["member"], "note": clean_note(r["note"]), "auto": bool(r["is_auto"]),
-                      "fee": bool(r["is_fee"])})
+                      "fee": bool(r["is_fee"]), "by": r["created_by"]})
     for _, c in book.contribs.head(limit).iterrows():
         items.append({"date": c["date"], "id": -c["id"], "kind": "Goal", "title": c["goal"], "amount": c["amount"],
-                      "account": "", "to": "", "who": SHARED, "note": c["note"], "auto": False, "fee": False})
+                      "account": "", "to": "", "who": SHARED, "note": c["note"], "auto": False, "fee": False,
+                      "by": c["created_by"]})
     items.sort(key=lambda i: (i["date"], i["id"]), reverse=True)
     return items[:limit]
 
 
-def feed_html(items, show_who=False):
+def feed_html(items, show_who=False, names=None):
+    """names: username -> display name; when given, each entry says who added it."""
     out, last_day = [], None
     for i in items:
         if i["date"] != last_day:
@@ -153,6 +155,8 @@ def feed_html(items, show_who=False):
             meta.append(esc(i["who"]))
         if i["note"] and not i["auto"]:
             meta.append(esc(i["note"]))
+        if names and i.get("by"):
+            meta.append(f"added by {esc(names.get(i['by'], i['by']))}")
         out.append(
             f'<div class="feed-row"><div class="feed-icon {cls}">{icon}</div>'
             f'<div class="feed-main"><div class="feed-title"><span class="t">{esc(i["title"])}</span>{tags}</div>'

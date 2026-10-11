@@ -95,6 +95,32 @@ TABLES = [
     # The daily job reads this column; older databases were created without it.
     "ALTER TABLE recurring_rules ADD COLUMN IF NOT EXISTS fee NUMERIC(10, 2)",
     "CREATE TABLE IF NOT EXISTS app_meta (key VARCHAR(50) PRIMARY KEY, value TEXT)",
+    # ---- sign-in ----
+    """
+    CREATE TABLE IF NOT EXISTS users (
+        id SERIAL PRIMARY KEY,
+        username VARCHAR(30) UNIQUE NOT NULL,      -- always stored in lower case
+        display_name VARCHAR(50) NOT NULL,
+        password_hash TEXT NOT NULL,               -- pbkdf2_sha256$iterations$salt$hash, never the password
+        is_owner BOOLEAN NOT NULL DEFAULT FALSE,
+        failed_logins INTEGER NOT NULL DEFAULT 0,
+        locked_until TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        last_login TIMESTAMPTZ
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS sessions (
+        token_hash CHAR(64) PRIMARY KEY,           -- sha256 of the browser's token, so a database leak can't be replayed
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        expires_at TIMESTAMPTZ NOT NULL
+    )
+    """,
+    "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS created_by VARCHAR(30)",
+    "ALTER TABLE goal_contributions ADD COLUMN IF NOT EXISTS created_by VARCHAR(30)",
+    # speeds up the newest-first listing as the history grows
+    "CREATE INDEX IF NOT EXISTS transactions_date_idx ON transactions (date DESC, id DESC)",
 ]
 
 

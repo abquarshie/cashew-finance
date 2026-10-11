@@ -1,14 +1,16 @@
-"""Cached data loading and the questions every page asks of it.
+"""Loading the family's data and the questions every page asks of it.
 
-Loads are cached for a minute and cleared after every save, so clicking around
-the app no longer hits the database each time.
+Everything is read in one database trip and prepared once, then shared by every
+open session until something is saved (or for a minute, to pick up entries the
+daily job adds). Pages only read from it; they never change it in place.
 """
-from datetime import date
+from datetime import date, timedelta
+from functools import cached_property
 
 import pandas as pd
 import streamlit as st
 
-from core.db import query
+from core.db import transact
 
 CURRENCY = "GH₵"
 SHARED = "Household"  # used when a transaction isn't tied to one family member
@@ -19,46 +21,62 @@ AUTO_PREFIX = "Auto · "
 FEE_PREFIX = "Fee · "
 TTL = 60
 
+TX_SQL = ("SELECT id, date, type, category, amount, note, member, account, to_account, created_by "
+          "FROM transactions ORDER BY date DESC, id DESC")
 
-@st.cache_data(ttl=TTL, show_spinner=False)
-def _transactions():
-    return query(
-        "SELECT id, date, type, category, amount, note, member, account, to_account "
-        "FROM transactions ORDER BY date DESC, id DESC"
-    )
+# The smaller tables, each as (columns, query). They all come back together in ONE round trip
+# (as JSON), instead of one trip per table: on a distant database each trip costs ~0.1-0.2 s.
+SMALL = {
+    "budgets": (["category", "monthly_limit"], "SELECT category, monthly_limit FROM budgets ORDER BY category"),
+    "cats": (["name", "group_name", "kind"], "SELECT name, group_name, kind FROM categories ORDER BY id"),
+    "accts": (["name", "opening_balance"], "SELECT name, opening_balance FROM accounts ORDER BY id"),
+    "rules": (["id", "name", "type", "amount", "fee", "category", "account", "to_account", "member", "note", "frequency",
+               "start_date", "next_date", "run_count", "end_date", "active", "last_run"],
+              "SELECT id, name, type, amount, fee, category, account, to_account, member, note, frequency, start_date, "
+              "next_date, run_count, end_date, active, last_run FROM recurring_rules ORDER BY id"),
+    "goals": (["id", "name", "target", "deadline", "saved"],
+              "SELECT g.id, g.name, g.target, g.deadline, COALESCE(SUM(c.amount), 0) AS saved "
+              "FROM goals g LEFT JOIN goal_contributions c ON c.goal_id = g.id "
+              "GROUP BY g.id, g.name, g.target, g.deadline ORDER BY g.id"),
+    "contribs": (["id", "date", "goal_id", "goal", "amount", "note", "created_by"],
+                 "SELECT c.id, c.date, c.goal_id, g.name AS goal, c.amount, c.note, c.created_by "
+                 "FROM goal_contributions c JOIN goals g ON g.id = c.goal_id ORDER BY c.date DESC, c.id DESC LIMIT 200"),
+    "users": (["id", "username", "display_name", "is_owner", "last_login", "created_at"],
+              "SELECT id, username, display_name, is_owner, last_login, created_at FROM users ORDER BY id"),
+}
+SMALL_SQL = "SELECT " + ", ".join(
+    f"(SELECT COALESCE(json_agg(t), '[]'::json) FROM ({sql}) t) AS {name}" for name, (_, sql) in SMALL.items())
+DATE_COLS = {"rules": ["start_date", "next_date", "end_date", "last_run"], "goals": ["deadline"], "contribs": ["date"]}
 
 
-@st.cache_data(ttl=TTL, show_spinner=False)
-def _setup():
-    budgets = query("SELECT category, monthly_limit FROM budgets ORDER BY category")
-    cats = query("SELECT name, group_name, kind FROM categories ORDER BY id")
-    accts = query("SELECT name, opening_balance FROM accounts ORDER BY id")
-    return budgets, cats, accts
+def _as_dates(df, cols):
+    for c in cols:
+        d = pd.to_datetime(df[c], errors="coerce")
+        df[c] = [x.date() if pd.notna(x) else None for x in d]
+    return df
 
 
-@st.cache_data(ttl=TTL, show_spinner=False)
-def _rules():
-    return query("SELECT * FROM recurring_rules ORDER BY id")
+def _load_frames(conn):
+    out = {}
+    with conn.cursor() as cur:
+        cur.execute(TX_SQL)
+        out["tx"] = pd.DataFrame(cur.fetchall(), columns=[c[0] for c in cur.description])
+        cur.execute(SMALL_SQL)
+        row = cur.fetchone()
+    for (name, (cols, _)), records in zip(SMALL.items(), row):
+        df = pd.DataFrame(records or [], columns=cols)
+        out[name] = _as_dates(df, DATE_COLS.get(name, []))
+    return out
 
 
-@st.cache_data(ttl=TTL, show_spinner=False)
-def _goals():
-    goals = query(
-        """
-        SELECT g.id, g.name, g.target, g.deadline, COALESCE(SUM(c.amount), 0) AS saved
-        FROM goals g LEFT JOIN goal_contributions c ON c.goal_id = g.id
-        GROUP BY g.id, g.name, g.target, g.deadline
-        ORDER BY g.id
-        """
-    )
-    contribs = query(
-        """
-        SELECT c.id, c.date, c.goal_id, g.name AS goal, c.amount, c.note
-        FROM goal_contributions c JOIN goals g ON g.id = c.goal_id
-        ORDER BY c.date DESC, c.id DESC LIMIT 200
-        """
-    )
-    return goals, contribs
+@st.cache_resource(ttl=TTL, show_spinner=False)
+def load_book():
+    """All data, from one database round of queries on one connection."""
+    return Book(transact(_load_frames))
+
+
+def book():
+    return load_book()
 
 
 def _floats(df, *cols):
@@ -74,19 +92,21 @@ def _text(df, *cols):
 
 
 class Book:
-    """Everything the pages need, loaded once per run."""
+    """Everything the pages need. Built once per data change and shared, so treat it as read-only."""
 
-    def __init__(self):
-        budgets, cats, accts = _setup()
+    def __init__(self, f):
+        cats = f["cats"]
         self.cats = cats
-        self.budgets = _floats(budgets, "monthly_limit")
-        self.accts = _floats(accts, "opening_balance")
+        self.budgets = _floats(f["budgets"], "monthly_limit")
+        self.accts = _floats(f["accts"], "opening_balance")
         self.account_names = self.accts["name"].tolist()
         self.group_of = dict(zip(cats["name"], cats["group_name"]))
         self.kind_of = dict(zip(cats["name"], cats["kind"]))
         self.groups = list(dict.fromkeys(cats["group_name"].tolist()))
+        self.users = f["users"]
+        self.name_of_user = dict(zip(self.users["username"], self.users["display_name"]))
 
-        tx = _text(_floats(_transactions(), "amount"), "note", "member", "account", "to_account")
+        tx = _text(_floats(f["tx"], "amount"), "note", "member", "account", "to_account", "created_by")
         if len(tx):
             tx["member"] = tx["member"].replace("", SHARED)
             tx["date"] = pd.to_datetime(tx["date"]).dt.date
@@ -99,36 +119,75 @@ class Book:
                 tx[c] = pd.Series(dtype=object)
         self.tx = tx
 
-        rules = _rules()
+        rules = f["rules"]
         self.rules = _text(_floats(rules, "amount", "fee"), "note", "to_account", "member") if len(rules) else rules
-
-        goals, contribs = _goals()
-        self.goals = _floats(goals, "target", "saved")
-        self.contribs = _text(_floats(contribs, "amount"), "note")
+        self.goals = _floats(f["goals"], "target", "saved")
+        self.contribs = _text(_floats(f["contribs"], "amount"), "note", "created_by")
 
     # ---- categories -------------------------------------------------------
     def category_names(self, kind=None):
         """Category names in the order they were set up, kept together by group."""
-        d = self.cats if kind is None else self.cats[self.cats["kind"] == kind]
-        names = []
-        for _, grp in d.groupby("group_name", sort=False):
-            names.extend(grp["name"].tolist())
-        return names
+        return list(self._category_names.get(kind, []))
+
+    @cached_property
+    def _category_names(self):
+        out = {}
+        for kind in [None] + KINDS:
+            d = self.cats if kind is None else self.cats[self.cats["kind"] == kind]
+            names = []
+            for _, grp in d.groupby("group_name", sort=False):
+                names.extend(grp["name"].tolist())
+            out[kind] = names
+        return out
 
     def cat_label(self, name):
         group = self.group_of.get(name)
         return f"{group} › {name}" if group and group != name else name
 
+    @cached_property
+    def _manual(self):
+        """Entries people typed in themselves (not auto entries or fees): the basis for smart defaults."""
+        if not len(self.tx):
+            return self.tx
+        return self.tx[~self.tx["is_auto"] & ~self.tx["is_fee"]]
+
+    def top_categories(self, kind, n=6):
+        """The categories used most for this type over the last 90 days, then the rest in set-up order."""
+        names = self.category_names(kind)
+        ranked = []
+        m = self._manual
+        if len(m):
+            recent = m[(m["type"] == kind) & (m["date"] >= date.today() - timedelta(days=90))]
+            ranked = [c for c in recent["category"].value_counts().index if c in names]
+        return (ranked + [c for c in names if c not in ranked])[:n]
+
+    def default_category(self, kind):
+        top = self.top_categories(kind, 1)
+        return top[0] if top else None
+
+    def last_amount(self, kind, category):
+        """What was last entered for this category, for the one-tap 'same as last time' button."""
+        m = self._manual
+        if not len(m):
+            return None
+        hit = m[(m["type"] == kind) & (m["category"] == category)]
+        return float(hit["amount"].iloc[0]) if len(hit) else None
+
     # ---- people and accounts ---------------------------------------------
-    def members(self):
+    @cached_property
+    def _members(self):
         others = set(self.tx["member"]) - {SHARED} if len(self.tx) else set()
         return [SHARED] + sorted(others)
 
-    @property
+    def members(self):
+        return list(self._members)
+
+    @cached_property
     def multi_member(self):
         return len(self.tx) > 0 and self.tx["member"].nunique() > 1
 
-    def balances(self):
+    @cached_property
+    def _balances(self):
         bal = self.accts.set_index("name")["opening_balance"].astype(float)
         t = self.tx
         if not len(t):
@@ -145,35 +204,32 @@ class Book:
             + total("Transfer", "to_account")
         )
 
-    def unassigned_count(self):
+    def balances(self):
+        return self._balances.copy()
+
+    def balance(self, account):
+        return float(self._balances.get(account, 0.0))
+
+    @cached_property
+    def unassigned(self):
         if not len(self.tx):
             return 0
         return int(((self.tx["account"] == "") & (self.tx["type"] != "Transfer")).sum())
 
-    # ---- smart defaults ---------------------------------------------------
+    def unassigned_count(self):
+        return self.unassigned
+
     def default_account(self, kind, col="account"):
         """The account last used for this type of entry, so the usual choice is already picked."""
-        if len(self.tx):
-            used = self.tx[(self.tx["type"] == kind) & (self.tx[col] != "") & ~self.tx["is_auto"]]
-            for name in used[col]:
+        m = self._manual
+        if len(m):
+            used = m[(m["type"] == kind) & (m[col] != "")]
+            for name in used[col].head(20):
                 if name in self.account_names:
                     return name
         if col == "account" and "Cash" in self.account_names:
             return "Cash"
         return self.account_names[0] if self.account_names else None
-
-    def default_category(self, kind):
-        """The category used most often for this type over the last 60 days."""
-        names = self.category_names(kind)
-        if not names:
-            return None
-        if len(self.tx):
-            recent = self.tx[(self.tx["type"] == kind) & ~self.tx["is_auto"] & ~self.tx["is_fee"]]
-            recent = recent[recent["date"] >= date.today() - pd.Timedelta(days=60)]
-            for name in recent["category"].value_counts().index:
-                if name in names:
-                    return name
-        return names[0]
 
     # ---- months -----------------------------------------------------------
     def months(self):
@@ -182,23 +238,34 @@ class Book:
         found = set(self.tx["month"]) if len(self.tx) else set()
         return sorted(found | {this}, reverse=True)
 
+    @cached_property
+    def _month_totals(self):
+        t = self.tx
+        if not len(t):
+            return {}
+        sums = t[t["type"].isin(["Income", "Expense"])].groupby(["month", "type"])["amount"].sum()
+        return sums.to_dict()
+
     def month_totals(self, period):
-        d = self.tx[self.tx["month"] == period] if len(self.tx) else self.tx
-        inc = float(d.loc[d["type"] == "Income", "amount"].sum()) if len(d) else 0.0
-        exp = float(d.loc[d["type"] == "Expense", "amount"].sum()) if len(d) else 0.0
-        return inc, exp
+        mt = self._month_totals
+        return float(mt.get((period, "Income"), 0.0)), float(mt.get((period, "Expense"), 0.0))
+
+    def month_expenses(self, period):
+        if not len(self.tx):
+            return self.tx
+        return self.tx[(self.tx["month"] == period) & (self.tx["type"] == "Expense")]
 
     def budget_status(self, period):
         """Each budget with what was spent in that month, worst first."""
         if not len(self.budgets):
             return []
-        d = self.tx[(self.tx["month"] == period) & (self.tx["type"] == "Expense")] if len(self.tx) else self.tx
+        d = self.month_expenses(period)
         by_group = d.groupby("group")["amount"].sum() if len(d) else pd.Series(dtype=float)
         by_cat = d.groupby("category")["amount"].sum() if len(d) else pd.Series(dtype=float)
         groups = set(self.cats["group_name"])
         out = []
-        for _, row in self.budgets.iterrows():
-            key, limit = row["category"], float(row["monthly_limit"])
+        for key, limit in zip(self.budgets["category"], self.budgets["monthly_limit"]):
+            limit = float(limit)
             spent = float((by_group if key in groups else by_cat).get(key, 0.0))
             pct = spent / limit * 100 if limit > 0 else 0.0
             out.append({"name": key, "limit": limit, "spent": spent, "pct": pct, "is_group": key in groups})
@@ -212,9 +279,13 @@ class Book:
             return None
         return active.sort_values(["next_date", "id"]).iloc[0]
 
-
-def book():
-    return Book()
+    def auto_due(self, today=None):
+        """True when an auto transaction is due, so the app only asks the database when there's work to do."""
+        if not len(self.rules):
+            return False
+        today = today or date.today()
+        active = self.rules[self.rules["active"]]
+        return bool(len(active) and (pd.to_datetime(active["next_date"]).dt.date <= today).any())
 
 
 def money(x, signed=False):

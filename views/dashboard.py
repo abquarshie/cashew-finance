@@ -5,26 +5,16 @@ import pandas as pd
 import streamlit as st
 
 from core.data import CURRENCY, book, money
-from ui.components import (accounts_html, activity_items, budget_html, card, change_pill, empty, feed_html,
-                           kpi_grid, kpi_html, page_header, pill, progress_html, section)
-from ui.entry import goal_dialog, quick_add_dialog, set_kind
-from ui.nav import link
+from ui.components import (activity_items, budget_html, card, change_pill, empty, esc, feed_html, kpi_grid, kpi_html,
+                           page_header, pill, progress_html, section)
+from ui.entry import entry_form
+from ui.nav import drawer, link
 
 IN_COLOR = "#1FA971"
 OUT_COLOR = "#E4574F"
 # axis labels like 1.5k instead of 1500
 SHORT = "datum.value >= 1000 ? format(datum.value / 1000, '~') + 'k' : format(datum.value, ',')"
 CAT_COLORS = ["#14A38F", "#E4572E", "#F2A541", "#5B8DEF", "#8DBF8B", "#D17A93", "#9FB0C3", "#A58BC9", "#C9A227", "#4FB0C6"]
-
-
-def _quick_actions(b):
-    row = st.container(horizontal=True, key="quick-actions", gap="small")
-    for kind, icon in (("Expense", ":material/remove:"), ("Income", ":material/add:"), ("Transfer", ":material/swap_horiz:")):
-        if row.button(kind, icon=icon, key=f"qa_{kind}", type="primary" if kind == "Expense" else "secondary"):
-            set_kind("q", kind)
-            quick_add_dialog(b)
-    if row.button("Add to goal", icon=":material/savings:", key="qa_goal"):
-        goal_dialog(b)
 
 
 def _trend_chart(b, period):
@@ -66,87 +56,125 @@ def _spend_chart(spend, field):
     )
 
 
+
+@st.fragment
+def _spending(period):
+    """Its Groups/Categories switch only redraws this card."""
+    b = book()
+    with card("spending"):
+        section("Where the money went", period.strftime("%B"))
+        month_tx = b.month_expenses(period)
+        if not len(month_tx):
+            empty("No expenses this month.")
+            return
+        mode = st.segmented_control("Show", ["Groups", "Categories"], default="Groups", key="spend_mode",
+                                    label_visibility="collapsed") or "Groups"
+        field = "group" if mode == "Groups" else "category"
+        spend = month_tx.groupby(field, as_index=False)["amount"].sum().sort_values("amount", ascending=False)
+        if field == "category" and len(spend) > 8:
+            top, rest = spend.head(7), spend.iloc[7:]
+            spend = pd.concat([top, pd.DataFrame([{field: "Everything else", "amount": rest["amount"].sum()}])])
+        st.altair_chart(_spend_chart(spend, field), width="stretch")
+        lead = spend.iloc[0]
+        st.caption(f"{lead[field]} took {lead['amount'] / month_tx['amount'].sum() * 100:.0f}% of spending.")
+
+
+def _mini(label, value, sub="", wide=False):
+    sub_html = f'<div class="mini-sub">{sub}</div>' if sub else ""
+    return f'<div class="mini{" wide" if wide else ""}"><div class="mini-label">{esc(label)}</div><div class="mini-value">{esc(value)}</div>{sub_html}</div>'
+
+
+def _more_stats(b, period):
+    """Secondary tiles, tucked into the sidebar behind a toggle."""
+    slot = drawer()
+    on = slot.toggle("More stats", key="more_stats", help="Savings rate, budgets at risk, auto entries, "
+                     "account balances and spending by person.")
+    if not on:
+        return
+    inc, exp = b.month_totals(period)
+    if inc > 0:
+        rate = (inc - exp) / inc * 100
+        rate_tile = _mini("Savings rate", f"{rate:.0f}%", "of income kept" if rate >= 0 else "Spending is above income")
+    else:
+        rate_tile = _mini("Savings rate", "—", "No income recorded yet")
+    status = b.budget_status(period)
+    at_risk = sum(1 for s in status if s["pct"] >= 75)
+    if status:
+        risk_tile = _mini("Budgets at risk", str(at_risk),
+                          "All on track" if not at_risk else f"of {len(status)} near or over the limit")
+    else:
+        risk_tile = _mini("Budgets at risk", "—", "No budgets set")
+    nxt = b.next_auto()
+    if nxt is None:
+        next_tile = _mini("Next auto entry", "—", "None set up", wide=True)
+    else:
+        days = (nxt["next_date"] - date.today()).days
+        when = "Today" if days <= 0 else ("Tomorrow" if days == 1 else f"{nxt['next_date']:%a %d %b}")
+        next_tile = _mini("Next auto entry", when, esc(f"{nxt['name']}, {money(nxt['amount'])}"), wide=True)
+
+    balances = b.balances()
+    rows = "".join(f'<div class="mini-row"><span>{esc(n)}</span><b class="{"neg" if v < 0 else ""}">{money(v)}</b></div>'
+                   for n, v in balances.items())
+    accounts = (f'<div class="mini wide"><div class="mini-label">In all accounts</div>'
+                f'<div class="mini-value">{money(float(balances.sum()) if len(balances) else 0)}</div>{rows}</div>')
+    tiles = [rate_tile, risk_tile, next_tile, accounts]
+
+    if b.multi_member:
+        by_member = b.month_expenses(period).groupby("member")["amount"].sum().sort_values(ascending=False)
+        if len(by_member):
+            total = float(by_member.sum())
+            people = "".join(
+                progress_html(who, amt / total * 100, "ok", pill(f"{amt / total * 100:.0f}%", "neutral"),
+                              f'<span class="num">{money(amt)}</span>')
+                for who, amt in by_member.items())
+            tiles.append(f'<div class="mini wide"><div class="mini-label">Spending by person, {period.strftime("%B")}</div>'
+                         f'<div class="mini-people">{people}</div></div>')
+    slot.html(f'<div class="mini-stack">{"".join(tiles)}</div>')
+    n = b.unassigned_count()
+    if n:
+        slot.caption(f"{n} older entr{'ies have' if n != 1 else 'y has'} no account, so balances may be off. "
+                     "Fix this in Categories & accounts.")
+
+
 def render():
     b = book()
-    months = b.months()
     head, pick = st.columns([3, 1], vertical_alignment="bottom")
     with pick:
-        period = st.selectbox("Month", months, format_func=lambda p: p.strftime("%B %Y"), key="dash_month",
+        period = st.selectbox("Month", b.months(), format_func=lambda p: p.strftime("%B %Y"), key="dash_month",
                               label_visibility="collapsed")
     with head:
         this_month = period == pd.Period(date.today(), "M")
-        page_header("Dashboard", "This month so far" if this_month else f"Summary for {period.strftime('%B %Y')}")
+        name = (st.session_state.get("user") or {}).get("name")
+        page_header(f"Hello, {name}" if name and this_month else "Dashboard",
+                    "This month so far" if this_month else f"Summary for {period.strftime('%B %Y')}")
 
     inc, exp = b.month_totals(period)
     p_inc, p_exp = b.month_totals(period - 1)
     net, p_net = inc - exp, p_inc - p_exp
-    if inc > 0:
-        rate = net / inc * 100
-        rate_val = f"{rate:.0f}%"
-        rate_sub = "of income kept" if rate >= 0 else "Spending is above income"
-    else:
-        rate_val, rate_sub = "—", "No income recorded yet"
-
-    balances = b.balances()
-    status = b.budget_status(period)
-    at_risk = sum(1 for s in status if s["pct"] >= 75)
-    if not status:
-        risk_val, risk_sub = "—", "No budgets set"
-    else:
-        risk_val = str(at_risk)
-        risk_sub = "All on track" if not at_risk else f"of {len(status)} near or over the limit"
-    nxt = b.next_auto()
-    if nxt is None:
-        next_val, next_sub = "—", "None set up"
-    else:
-        days = (nxt["next_date"] - date.today()).days
-        next_val = "Today" if days <= 0 else ("Tomorrow" if days == 1 else f"{nxt['next_date']:%a %d %b}")
-        next_sub = f"{nxt['name']}, {money(nxt['amount'])}"
-
     kpi_grid([
         kpi_html("Net balance", money(net), change_pill(net, p_net), featured=True),
         kpi_html("Income", money(inc), change_pill(inc, p_inc)),
         kpi_html("Expenses", money(exp), change_pill(exp, p_exp, good_when_up=False)),
-        kpi_html("Savings rate", rate_val, rate_sub),
-        kpi_html("In all accounts", money(float(balances.sum()) if len(balances) else 0), f"Across {len(balances)} accounts"),
-        kpi_html("Budgets at risk", risk_val, risk_sub),
-        kpi_html("Next auto entry", next_val, next_sub),
-    ])
-
-    _quick_actions(b)
+    ], cls="three")
+    _more_stats(b, period)
 
     left, right = st.columns([2, 3], gap="medium")
     with left:
+        with card("quick-add"):
+            section("Add an entry")
+            entry_form("q")
+    with right:
         with card("activity"):
             section("Recent activity")
-            items = activity_items(b, limit=8)
+            items = activity_items(b, limit=7)
             if items:
-                st.html(feed_html(items, show_who=b.multi_member))
+                st.html(feed_html(items, show_who=b.multi_member, names=b.name_of_user if len(b.users) > 1 else None))
                 st.page_link(link("transactions"), label="See all transactions", icon=":material/receipt_long:")
             else:
-                empty("Nothing recorded yet. Tap Expense or Income above to add your first entry.")
-    with right:
-        with card("trend"):
-            section("Income and expenses", "Last 6 months")
-            st.altair_chart(_trend_chart(b, period), width="stretch")
-        with card("spending"):
-            section("Where the money went")
-            month_tx = b.tx[(b.tx["month"] == period) & (b.tx["type"] == "Expense")] if len(b.tx) else b.tx
-            if not len(month_tx):
-                empty("No expenses this month.")
-            else:
-                mode = st.segmented_control("Show", ["Groups", "Categories"], default="Groups", key="spend_mode",
-                                            label_visibility="collapsed") or "Groups"
-                field = "group" if mode == "Groups" else "category"
-                spend = month_tx.groupby(field, as_index=False)["amount"].sum().sort_values("amount", ascending=False)
-                if field == "category" and len(spend) > 8:
-                    top, rest = spend.head(7), spend.iloc[7:]
-                    spend = pd.concat([top, pd.DataFrame([{field: "Everything else", "amount": rest["amount"].sum()}])])
-                st.altair_chart(_spend_chart(spend, field), width="stretch")
-                lead = spend.iloc[0]
-                st.caption(f"{lead[field]} took {lead['amount'] / month_tx['amount'].sum() * 100:.0f}% of spending.")
+                empty("Nothing recorded yet. Add your first entry with the form on this page.")
 
     with card("budgets"):
+        status = b.budget_status(period)
         section("Budgets", period.strftime("%B"))
         if status:
             st.html(f'<div class="prog-list">{"".join(budget_html(s) for s in status)}</div>')
@@ -154,26 +182,10 @@ def render():
             empty("No monthly budgets yet.")
             st.page_link(link("budgets"), label="Set a budget", icon=":material/donut_small:")
 
-    if b.multi_member:
-        month_exp = b.tx[(b.tx["month"] == period) & (b.tx["type"] == "Expense")]
-        by_member = month_exp.groupby("member")["amount"].sum().sort_values(ascending=False)
-        if len(by_member):
-            total = float(by_member.sum())
-            with card("members"):
-                section("Spending by person", period.strftime("%B"))
-                rows = "".join(
-                    progress_html(who, amt / total * 100, "ok", pill(f"{amt / total * 100:.0f}%", "neutral"),
-                                  f'<span class="num">{money(amt)}</span>')
-                    for who, amt in by_member.items()
-                )
-                st.html(f'<div class="prog-list">{rows}</div>')
-
-    if len(balances):
-        with card("accounts"):
-            section("Accounts", "Balance now")
-            st.html(accounts_html(balances))
-            n = b.unassigned_count()
-            if n:
-                st.caption(f"{n} older entr{'ies have' if n != 1 else 'y has'} no account, so these balances may be off. "
-                           "Assign them in Categories & accounts.")
-
+    left, right = st.columns([3, 2], gap="medium")
+    with left:
+        with card("trend"):
+            section("Income and expenses", "Last 6 months")
+            st.altair_chart(_trend_chart(b, period), width="stretch")
+    with right:
+        _spending(period)

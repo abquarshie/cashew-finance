@@ -84,6 +84,33 @@ div.st-key-card-savebar { position: sticky; bottom: 14px; z-index: 20; border-co
 .kpi.featured .pill.out { background: rgba(255,180,168,.16); color: var(--feature-out); }
 .kpi.featured .pill.neutral { background: rgba(255,255,255,.1); color: var(--feature-muted); }
 
+.kpi-grid.three { grid-template-columns: 1.35fr 1fr 1fr; }
+.kpi-grid.three .kpi.featured { grid-column: span 1; }
+
+/* ---- sidebar drawer tiles ---- */
+.mini-stack { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.mini.wide { grid-column: span 2; }
+.mini { border: 1px solid var(--line); border-radius: 14px; padding: .7rem .8rem; background: var(--card); }
+.mini-label { color: var(--muted); font-size: .76rem; font-weight: 650; }
+.mini-value { font-size: 1.15rem; font-weight: 800; letter-spacing: -.01em; font-variant-numeric: tabular-nums; margin-top: 1px; }
+.mini-sub { color: var(--muted); font-size: .74rem; font-weight: 600; margin-top: 1px; }
+.mini-row { display: flex; justify-content: space-between; gap: .5rem; font-size: .8rem; padding: .28rem 0;
+  border-top: 1px solid var(--line); margin-top: .3rem; }
+.mini-row:first-of-type { margin-top: .45rem; }
+.mini-row span { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mini-row b { font-variant-numeric: tabular-nums; font-weight: 700; }
+.mini-row b.neg { color: var(--out); }
+.mini-people { display: grid; gap: .7rem; margin-top: .5rem; }
+.mini-people .prog-foot { display: none; }
+
+/* ---- entry form ---- */
+div.st-key-card-quick-add [data-testid="stNumberInputContainer"] input,
+div.st-key-card-add-form [data-testid="stNumberInputContainer"] input { font-size: 1.35rem; font-weight: 800;
+  font-variant-numeric: tabular-nums; }
+div.st-key-card-quick-add [data-testid="stNumberInputContainer"],
+div.st-key-card-add-form [data-testid="stNumberInputContainer"] { min-height: 3.1rem; }
+[data-testid="stPills"] button, [data-testid="stButtonGroup"] button { min-height: 2.25rem; }
+
 /* ---- pills ---- */
 .pill { display: inline-flex; align-items: center; gap: 4px; padding: 1px 9px; border-radius: 999px;
   font-size: .7rem; font-weight: 700; line-height: 1.6; white-space: nowrap; vertical-align: middle; }
@@ -145,6 +172,23 @@ div.st-key-card-savebar { position: sticky; bottom: 14px; z-index: 20; border-co
 .field-msg.error { color: var(--out); }
 .field-msg.warn { color: var(--warn); }
 .field-msg.hint { color: var(--muted); font-weight: 500; }
+.field-msg.ok { color: var(--in); }
+
+/* ---- sign-in ---- */
+div.st-key-card-auth { max-width: 440px; margin: 4vh auto 0; }
+.auth-head { text-align: center; margin: .2rem 0 .6rem; }
+.auth-logo { width: 52px; height: 52px; margin: 0 auto .55rem; display: block; }
+.auth-note { background: var(--accent-soft); color: var(--text); border-radius: 12px; padding: .75rem .9rem;
+  font-size: .88rem; line-height: 1.45; }
+.auth-title { font-size: 1.6rem; font-weight: 800; letter-spacing: -.03em; }
+.auth-sub { color: var(--muted); font-size: .92rem; margin-top: .15rem; }
+
+/* ---- signed-in person in the sidebar ---- */
+.me { display: flex; align-items: center; gap: .6rem; }
+.me-avatar { width: 34px; height: 34px; border-radius: 50%; background: var(--accent-soft); color: var(--accent-ink);
+  display: grid; place-items: center; font-weight: 800; font-size: .9rem; flex: none; }
+.me-name { font-weight: 700; font-size: .9rem; line-height: 1.2; }
+.me-role { color: var(--muted); font-size: .76rem; }
 
 .empty { color: var(--muted); font-size: .9rem; padding: .3rem 0; }
 
@@ -157,7 +201,8 @@ div.st-key-quick-actions .stButton > button { border-radius: 999px; padding: .35
   [data-testid="stMainBlockContainer"], .block-container { padding: 3.2rem .85rem 5rem; }
   .page-head { margin-bottom: 1rem; }
   .page-title { font-size: 1.5rem; }
-  .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
+  .kpi-grid, .kpi-grid.three { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
+  .kpi-grid.three .kpi.featured { grid-column: span 2; }
   .kpi { padding: .8rem .85rem; border-radius: 14px; }
   .kpi-value { font-size: 1.12rem; }
   .kpi.featured .kpi-value { font-size: 1.7rem; }
