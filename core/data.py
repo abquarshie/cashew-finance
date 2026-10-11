@@ -10,6 +10,7 @@ from functools import cached_property
 import pandas as pd
 import streamlit as st
 
+from auto_rules import occurrence
 from core.db import transact
 
 CURRENCY = "GH₵"
@@ -29,7 +30,8 @@ TX_SQL = ("SELECT id, date, type, category, amount, note, member, account, to_ac
 SMALL = {
     "budgets": (["category", "monthly_limit"], "SELECT category, monthly_limit FROM budgets ORDER BY category"),
     "cats": (["name", "group_name", "kind"], "SELECT name, group_name, kind FROM categories ORDER BY id"),
-    "accts": (["name", "opening_balance"], "SELECT name, opening_balance FROM accounts ORDER BY id"),
+    "accts": (["name", "opening_balance", "spendable"],
+              "SELECT name, opening_balance, COALESCE(spendable, TRUE) AS spendable FROM accounts ORDER BY id"),
     "rules": (["id", "name", "type", "amount", "fee", "category", "account", "to_account", "member", "note", "frequency",
                "start_date", "next_date", "run_count", "end_date", "active", "last_run"],
               "SELECT id, name, type, amount, fee, category, account, to_account, member, note, frequency, start_date, "
@@ -270,6 +272,84 @@ class Book:
             pct = spent / limit * 100 if limit > 0 else 0.0
             out.append({"name": key, "limit": limit, "spent": spent, "pct": pct, "is_group": key in groups})
         return sorted(out, key=lambda b: b["pct"], reverse=True)
+
+    # ---- safe to spend ---------------------------------------------------------
+    @cached_property
+    def everyday_accounts(self):
+        return [n for n, sp in zip(self.accts["name"], self.accts["spendable"]) if bool(sp)]
+
+    def payday(self, today=None):
+        """When money next comes in: the next auto income entry, or a month after the last salary,
+        or the 1st of next month if neither is known."""
+        today = today or date.today()
+        if len(self.rules):
+            inc = self.rules[self.rules["active"] & (self.rules["type"] == "Income")]
+            upcoming = [d for d in inc["next_date"] if d and d > today]
+            if upcoming:
+                return min(upcoming), "next auto income"
+        m = self._manual
+        if len(m):
+            sal = m[(m["type"] == "Income") & m["category"].str.contains("salary", case=False, regex=False)]
+            if len(sal):
+                last = sal["date"].iloc[0]
+                n = 1
+                while occurrence(last, "Monthly", n) <= today and n < 600:
+                    n += 1
+                return occurrence(last, "Monthly", n), "a month after the last salary"
+        first_next = (pd.Period(today, "M") + 1).start_time.date()
+        return first_next, "the 1st of next month"
+
+    def safe_to_spend(self, today=None):
+        """Everyday money, minus bills that auto transactions will take before payday,
+        minus what's still unspent in this month's budgets."""
+        today = today or date.today()
+        everyday = set(self.everyday_accounts)
+        money = sum(self.balance(a) for a in everyday)
+        pay, pay_basis = self.payday(today)
+
+        bills, bills_by_cat = 0.0, {}
+        if len(self.rules):
+            for _, r in self.rules[self.rules["active"]].iterrows():
+                n, guard = int(r["run_count"]), 0
+                d = occurrence(r["start_date"], r["frequency"], n)
+                while d < pay and guard < 400 and (r["end_date"] is None or pd.isna(r["end_date"]) or d <= r["end_date"]):
+                    cost = 0.0
+                    fee = float(r["fee"]) if pd.notna(r["fee"]) else 0.0
+                    if r["type"] == "Expense" and r["account"] in everyday:
+                        cost = float(r["amount"])
+                    elif r["type"] == "Transfer":
+                        out_of = r["account"] in everyday
+                        into = r["to_account"] in everyday
+                        if out_of and not into:
+                            cost = float(r["amount"]) + fee   # e.g. the monthly move into Susu
+                        elif out_of:
+                            cost = fee
+                        elif into:
+                            cost = -float(r["amount"])         # money coming back into everyday accounts
+                    if cost:
+                        bills += cost
+                        if d.month == today.month and d.year == today.year and r["type"] == "Expense":
+                            bills_by_cat[r["category"]] = bills_by_cat.get(r["category"], 0.0) + cost
+                    n += 1
+                    guard += 1
+                    d = occurrence(r["start_date"], r["frequency"], n)
+
+        budget_left = 0.0
+        period = pd.Period(today, "M")
+        status = self.budget_status(period)
+        group_budgets = {b["name"] for b in status if b["is_group"]}
+        for b in status:
+            if not b["is_group"] and self.group_of.get(b["name"]) in group_budgets:
+                continue  # already covered by its group's budget
+            # don't count an upcoming auto bill twice if it falls inside this budget
+            already = sum(v for c, v in bills_by_cat.items()
+                          if c == b["name"] or (b["is_group"] and self.group_of.get(c) == b["name"]))
+            budget_left += max(b["limit"] - b["spent"] - already, 0.0)
+
+        safe = money - bills - budget_left
+        days = max((pay - today).days, 1)
+        return {"safe": safe, "money": money, "bills": bills, "budget_left": budget_left, "payday": pay,
+                "basis": pay_basis, "days": days, "per_day": safe / days, "accounts": sorted(everyday)}
 
     def next_auto(self):
         if not len(self.rules):

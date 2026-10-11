@@ -91,6 +91,25 @@ div.st-key-card-savebar { position: sticky; bottom: 14px; z-index: 20; border-co
 .kpi-grid.four .kpi.featured { grid-column: auto; }
 .kpi-grid.four .kpi-sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
+/* account balances (tall, left) with income and expenses stacked beside it */
+.kpi-grid.bal-grid { grid-template-columns: 1.5fr 1fr; grid-template-rows: auto 1fr; }
+.kpi-grid.bal-grid .kpi.bal { grid-row: span 2; grid-column: auto; }
+.bal-rows { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); column-gap: 1.4rem; margin: .1rem 0 .2rem; }
+.bal-row { display: flex; justify-content: space-between; gap: .6rem; font-size: .84rem; padding: .32rem 0;
+  border-top: 1px solid rgba(255,255,255,.09); }
+.bal-row span { color: var(--feature-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bal-row span i { font-style: normal; font-size: .68rem; font-weight: 700; padding: 0 6px; border-radius: 999px;
+  background: rgba(255,255,255,.1); margin-left: 4px; }
+.bal-row b { color: var(--feature-text); font-weight: 700; font-variant-numeric: tabular-nums; }
+.bal-row b.neg, .safe b.neg { color: var(--feature-out); }
+.safe { margin-top: .7rem; padding: .7rem .8rem; border-radius: 12px; background: rgba(255,255,255,.07); position: relative; z-index: 1; }
+.safe-head { display: flex; justify-content: space-between; align-items: baseline; gap: .6rem; }
+.safe-head span { color: var(--feature-muted); font-size: .8rem; font-weight: 650; }
+.safe-head b { color: var(--feature-in); font-size: 1.2rem; font-weight: 800; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.safe-sub { color: var(--feature-muted); font-size: .74rem; line-height: 1.45; margin-top: .25rem; }
+.bal-note { color: var(--feature-muted); font-size: .72rem; margin-top: .5rem; }
+.kpi.featured .kpi-label, .kpi.featured .kpi-value, .bal-rows { position: relative; z-index: 1; }
+
 /* ---- collapsible dashboard panels ---- */
 div[class*="st-key-draft_open_"] details { background: var(--card); border: 1px solid var(--line) !important;
   border-radius: 18px !important; box-shadow: var(--shadow); overflow: hidden; }
@@ -217,7 +236,10 @@ div.st-key-quick-actions .stButton > button { border-radius: 999px; padding: .35
   [data-testid="stMainBlockContainer"], .block-container { padding: 3.2rem .85rem 5rem; }
   .page-head { margin-bottom: 1rem; }
   .page-title { font-size: 1.5rem; }
-  .kpi-grid, .kpi-grid.three, .kpi-grid.four { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
+  .kpi-grid, .kpi-grid.three, .kpi-grid.four, .kpi-grid.bal-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
+  .kpi-grid.bal-grid { grid-template-rows: none; }
+  .kpi-grid.bal-grid .kpi.bal { grid-column: span 2; grid-row: auto; }
+  .bal-rows { grid-template-columns: 1fr; }
   .kpi-grid.four { grid-template-rows: none; grid-auto-flow: row; }
   .kpi-grid.three .kpi.featured, .kpi-grid.four .kpi.featured, .kpi-grid.four .kpi:nth-child(2) { grid-column: span 2; }
   .kpi-grid.four .kpi:nth-child(2) .kpi-value { font-size: 1.35rem; }

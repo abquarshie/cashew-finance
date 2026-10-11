@@ -10,10 +10,12 @@ Built for speed on a phone: type the amount, tap a category, tap Save.
 """
 from datetime import date, timedelta
 
+import pandas as pd
 import streamlit as st
 
+from core import momo
 from core.data import CURRENCY, FEE_CATEGORY, KINDS, SHARED, book, money
-from core.db import execute, run_many
+from core.db import execute, fetch_one, run_many
 from ui.components import field_msg, flash
 
 SAVE_LABEL = {"Expense": "Save expense", "Income": "Save income", "Transfer": "Save transfer"}
@@ -104,21 +106,32 @@ def _entry_date(prefix):
     return picked or date.today()
 
 
-def _focus_amount(prefix):
-    """Put the cursor in the amount box and ask phones for the number keypad."""
+def _keypad():
+    """Money boxes get the phone's decimal keypad, including when Streamlit redraws them."""
     st.html(
-        f"""<script>
+        """<script>
+        (() => {
+          if (window.__cashewKeypad) return;
+          window.__cashewKeypad = true;
+          const mark = () => document.querySelectorAll('[class*="st-key-draft_"][class*="_amount"] input, '
+            + '[class*="st-key-draft_"][class*="_fee"] input').forEach(i => {
+              if (i.getAttribute('inputmode') !== 'decimal') i.setAttribute('inputmode', 'decimal');
+            });
+          new MutationObserver(mark).observe(document.body, {childList: true, subtree: true});
+          mark();
+        })();
+        </script>""",
+        unsafe_allow_javascript=True,
+        width="content",
+    )
+
+
+def _focus_amount(prefix):
+    """Put the cursor in the amount box."""
+    n = st.session_state["_focus_n"] = st.session_state.get("_focus_n", 0) + 1
+    st.html(
+        f"""<script>/* request {n}: changes each time so the browser runs it again */
         (() => {{
-          // money boxes get the decimal keypad, including when Streamlit redraws them
-          if (!window.__cashewKeypad) {{
-            window.__cashewKeypad = true;
-            const mark = () => document.querySelectorAll('[class*="st-key-draft_"][class*="_amount"] input, '
-              + '[class*="st-key-draft_"][class*="_fee"] input').forEach(i => {{
-                if (i.getAttribute('inputmode') !== 'decimal') i.setAttribute('inputmode', 'decimal');
-              }});
-            new MutationObserver(mark).observe(document.body, {{childList: true, subtree: true}});
-            mark();
-          }}
           let tries = 0;
           const go = () => {{
             const el = document.querySelector('.st-key-{_k(prefix, "amount")} input');
@@ -134,12 +147,140 @@ def _focus_amount(prefix):
     )
 
 
-def _save(prefix, values):
+def _set_choice(key, value):
+    st.session_state[key] = value
+    st.session_state[key + "__last"] = value
+
+
+def _apply_momo(prefix):
+    """Fill the form from a pasted MoMo text."""
     ss = st.session_state
+    text = ss.get(_k(prefix, "momo_text")) or ""
+    if not text.strip():
+        ss[_k(prefix, "momo_info")] = None
+        return
+    found = momo.parse(text)
+    if not found:
+        ss[_k(prefix, "momo_info")] = [("error", "That doesn't look like a mobile money message. "
+                                                 "Copy the whole text, including the GHS amount.")]
+        return
+    b = book()
+    acct = momo.momo_account(b.account_names)
+    kind = found["kind"]
+    _set_choice(_k(prefix, "kind"), kind)
+    ss[_k(prefix, "amount")] = found["amount"]
+    ss[_k(prefix, "fee")] = found["fee"] or None
+    note = found["party"] or ""
+    if found["reference"]:
+        note = f"{note} – {found['reference']}" if note else found["reference"]
+    ss[_k(prefix, "note")] = note
+    ss[_k(prefix, "momo_id")] = found["txn_id"]
+
+    d = found["date"] or date.today()
+    if d == date.today():
+        _set_choice(_k(prefix, "when"), "Today")
+    elif d == date.today() - timedelta(days=1):
+        _set_choice(_k(prefix, "when"), "Yesterday")
+    else:
+        _set_choice(_k(prefix, "when"), "Other day")
+        ss[_k(prefix, "date")] = d
+
+    if kind == "Transfer":
+        cash = "Cash" if "Cash" in b.account_names else None
+        src, dst = (acct, cash) if found["direction"] == "cash_out" else (cash, acct)
+        if src:
+            _set_choice(_k(prefix, "from"), src)
+        if dst:
+            _set_choice(_k(prefix, "to"), dst)
+    else:
+        if acct:
+            _set_choice(_k(prefix, f"acct_{kind}"), acct)
+        names = b.category_names(kind)
+        cat = next((h for h in found["category_hints"] if h in names), None)
+        if not cat and found["party"] and len(b._manual):
+            # the category used last time for this person or shop
+            m = b._manual
+            prev = m[(m["type"] == kind) & m["note"].str.contains(found["party"], case=False, regex=False)]
+            if len(prev) and prev["category"].iloc[0] in names:
+                cat = prev["category"].iloc[0]
+        if cat:
+            _set_choice(_k(prefix, f"cat_{kind}"), cat)
+
+    tips = [("ok", momo.describe(found) + ". Check the details, then save.")]
+    if not acct:
+        tips.append(("hint", "Tip: add an account called MoMo in Categories & accounts and these will go there "
+                             "automatically."))
+    elif found["balance"] is not None:
+        sign = 1 if kind == "Income" or found["direction"] == "cash_in" else -1
+        after = b.balance(acct) + sign * found["amount"] - (found["fee"] or 0)
+        if abs(after - found["balance"]) >= 0.01:
+            tips.append(("warn", f"Your MoMo balance is {money(found['balance'])}; Cashew will show {money(after)} "
+                                 f"for {acct} after this, so an earlier entry may be missing."))
+    ss[_k(prefix, "momo_info")] = tips
+    ss[_k(prefix, "dup")] = None
+
+
+def _clear_momo(prefix):
+    ss = st.session_state
+    for name in ("momo_text", "momo_info", "momo_id"):
+        ss[_k(prefix, name)] = "" if name == "momo_text" else None
+
+
+def _find_duplicate(b, kind, category, amount, when, momo_id):
+    """Something that looks like this entry, already saved by anyone in the family."""
+    if momo_id:
+        row = fetch_one("SELECT created_by, created_at, date FROM transactions WHERE note LIKE %s ORDER BY id DESC LIMIT 1",
+                        (f"%MoMo ID {momo_id}%",))
+        if row:
+            who = _who(b, row[0])
+            return f"This MoMo payment is already saved ({who} added it for {row[2]:%d %b}). Save it again?"
+    row = fetch_one(
+        "SELECT created_by, created_at, date FROM transactions WHERE type = %s AND category = %s AND amount = %s "
+        "AND (created_at > now() - interval '1 day' OR date = %s) ORDER BY id DESC LIMIT 1",
+        (kind, category, amount, when))
+    if not row:
+        return None
+    who = _who(b, row[0])
+    if row[1] is not None:
+        local = pd.Timestamp(row[1]).tz_convert("Africa/Accra")
+        at = f"today at {local:%H:%M}" if local.date() == date.today() else f"on {local:%a %d %b} at {local:%H:%M}"
+    else:
+        at = f"for {row[2]:%d %b}"
+    return f"{who} already added {money(amount)} for {category} {at}. Save another one?"
+
+
+def _who(b, username):
+    if not username:
+        return "Someone"
+    if username == _me():
+        return "You"
+    return b.name_of_user.get(username, username)
+
+
+def _budget_alerts(b, kind, category, amount, when):
+    """Budgets this entry pushes near or over the limit."""
+    if kind != "Expense":
+        return []
+    out = []
+    for s in b.budget_status(pd.Period(when, "M")):
+        if not (s["name"] == category or (s["is_group"] and b.group_of.get(category) == s["name"])) or s["limit"] <= 0:
+            continue
+        before, after = s["spent"] / s["limit"] * 100, (s["spent"] + amount) / s["limit"] * 100
+        if after > 100:
+            out.append(f"{s['name']} is {money(s['spent'] + amount - s['limit'])} over its {money(s['limit'])} budget")
+        elif (after >= 75 > before) or (after >= 90 > before):
+            out.append(f"{s['name']} is now at {after:.0f}% of its {money(s['limit'])} budget")
+    return out
+
+
+def _save(prefix, values, confirmed=False):
+    ss = st.session_state
+    b = book()
     kind = values["kind"]
     amount = ss.get(_k(prefix, "amount"))  # read fresh, in case it was typed just before tapping Save
-    fee = ss.get(_k(prefix, "fee")) if kind == "Transfer" else None
+    fee = ss.get(_k(prefix, "fee"))
     note = (ss.get(_k(prefix, "note")) or "").strip()
+    momo_id = ss.get(_k(prefix, "momo_id"))
     who = values["who"]
     if kind != "Transfer":
         who = (ss.get(_k(prefix, "who")) or SHARED).strip() or SHARED
@@ -152,43 +293,82 @@ def _save(prefix, values):
     if not values["category"] or not values["account"]:
         ss[_k(prefix, "error")] = "Pick a category and an account."
         return
+    if not confirmed:
+        try:
+            dup = _find_duplicate(b, kind, values["category"], amount, values["date"], momo_id)
+        except Exception:
+            dup = None  # never block saving because the check itself failed
+        if dup:
+            ss[_k(prefix, "dup")] = {"msg": dup, "sig": (kind, amount, values["category"], values["date"])}
+            return
+    if momo_id:
+        note = f"{note} · MoMo ID {momo_id}" if note else f"MoMo ID {momo_id}"
+
     stmts = [(
         "INSERT INTO transactions (date, type, category, amount, note, member, account, to_account, created_by) "
         "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
         (values["date"], kind, values["category"], amount, note, who, values["account"], values["to"], _me()),
     )]
-    if kind == "Transfer" and fee and fee > 0:
+    if fee and fee > 0:
+        fee_note = f"Fee · {values['account']} to {values['to']}" if kind == "Transfer" else f"Fee · {values['category']}"
         stmts.append((
             "INSERT INTO transactions (date, type, category, amount, note, member, account, to_account, created_by) "
             "VALUES (%s, 'Expense', %s, %s, %s, %s, %s, NULL, %s)",
-            (values["date"], FEE_CATEGORY, fee, f"Fee · {values['account']} to {values['to']}", SHARED,
-             values["account"], _me()),
+            (values["date"], FEE_CATEGORY, fee, fee_note, SHARED, values["account"], _me()),
         ))
+    alerts = _budget_alerts(b, kind, values["category"], amount, values["date"])
     try:
         run_many(stmts)
     except Exception as exc:
         ss[_k(prefix, "error")] = f"That didn't save: {exc}"
         return
+    extra = f" plus {money(fee)} fee" if fee and fee > 0 else ""
     if kind == "Transfer":
-        extra = f" plus {money(fee)} fee" if fee and fee > 0 else ""
         flash(f"Moved {money(amount)} from {values['account']} to {values['to']}{extra}", ":material/swap_horiz:")
     else:
-        flash(f"Saved {money(amount)} {kind.lower()} to {values['category']}")
+        flash(f"Saved {money(amount)} {kind.lower()} to {values['category']}{extra}")
+    for a in alerts:
+        flash(a, ":material/warning:")
     # clear what changes every time; keep type, date, accounts and category for the next entry
     ss[_k(prefix, "amount")] = None
     ss[_k(prefix, "fee")] = None
     ss[_k(prefix, "note")] = ""
+    ss[_k(prefix, "dup")] = None
+    _clear_momo(prefix)
     ss[_k(prefix, "saved")] = True
+    ss[_k(prefix, "just_saved")] = True
     ss[_k(prefix, "focus")] = True
 
 
+def _cancel_dup(prefix):
+    st.session_state[_k(prefix, "dup")] = None
+
+
+def _momo_box(prefix):
+    ss = st.session_state
+    info = ss.get(_k(prefix, "momo_info"))
+    with st.expander("Paste a MoMo text", icon=":material/sms:", expanded=bool(info)):
+        st.text_area("MoMo text", key=_k(prefix, "momo_text"), height=96, label_visibility="collapsed",
+                     placeholder="Paste the whole message, e.g. Payment made for GHS 50.00 to …",
+                     on_change=_apply_momo, args=(prefix,))
+        row = st.container(horizontal=True)
+        row.button("Fill in the form", key=f"{prefix}_momo_go", icon=":material/auto_fix_high:",
+                   on_click=_apply_momo, args=(prefix,))
+        if info:
+            row.button("Clear", key=f"{prefix}_momo_clear", type="tertiary", on_click=_clear_momo, args=(prefix,))
+            for tone, text in info:
+                field_msg(text, tone)
+
+
 @st.fragment
-def entry_form(prefix):
+def entry_form(prefix, autofocus=True):
     ss = st.session_state
     b = book()
     if not b.account_names:
         st.warning("Add an account first in **Categories & accounts**.")
         return
+
+    _momo_box(prefix)
 
     kind_key = _k(prefix, "kind")
     if ss.get(kind_key) not in KINDS:
@@ -234,6 +414,10 @@ def entry_form(prefix):
             st.button(f"Same as last time: {money(last)}", key=f"{prefix}_last_{kind}", type="tertiary",
                       icon=":material/history:", on_click=_fill_amount, args=(prefix, last))
         account = _account_chips(b, "Account", acct_key)
+        if ss.get(_k(prefix, "fee")):  # MoMo texts often include a fee
+            fee = st.number_input(f"Fee ({CURRENCY})", min_value=0.0, value=None, step=0.5, format="%.2f",
+                                  placeholder="0.00", key=_k(prefix, "fee"),
+                                  help=f"Saved as a separate {FEE_CATEGORY} expense from the same account.")
 
     when = _entry_date(prefix)
     st.text_input("Note", key=_k(prefix, "note"), placeholder="Optional, e.g. Makola market",
@@ -263,12 +447,24 @@ def entry_form(prefix):
         st.error(ss.pop(_k(prefix, "error")))
 
     values = {"kind": kind, "date": when, "category": category, "account": account, "to": to_acct, "who": who}
-    st.button(SAVE_LABEL[kind], type="primary", disabled=bool(errors), width="stretch",
-              key=f"btn_{prefix}_save", on_click=_save, args=(prefix, values), icon=":material/check:")
-    if not amount and not errors:
-        field_msg("Enter an amount to save.", "hint")
+    dup = ss.get(_k(prefix, "dup"))
+    if dup and dup["sig"] == (kind, amount, category, when):
+        with st.container(key=f"{prefix}-dup"):
+            field_msg(dup["msg"], "warn")
+            row = st.container(horizontal=True)
+            row.button("Save anyway", type="primary", key=f"btn_{prefix}_dup_yes", icon=":material/check:",
+                       on_click=_save, args=(prefix, values, True))
+            row.button("Don't save", key=f"btn_{prefix}_dup_no", on_click=_cancel_dup, args=(prefix,))
+    else:
+        st.button(SAVE_LABEL[kind], type="primary", disabled=bool(errors), width="stretch",
+                  key=f"btn_{prefix}_save", on_click=_save, args=(prefix, values), icon=":material/check:")
+        if not amount and not errors:
+            field_msg("Enter an amount to save.", "hint")
 
-    if ss.pop(_k(prefix, "focus"), _k(prefix, "seen") not in ss):
+    _keypad()
+    want_focus = ss.get(_k(prefix, "focus")) or _k(prefix, "seen") not in ss
+    if want_focus and autofocus:
+        ss.pop(_k(prefix, "focus"), None)
         _focus_amount(prefix)
     ss[_k(prefix, "seen")] = True
     if ss.pop(_k(prefix, "saved"), False):

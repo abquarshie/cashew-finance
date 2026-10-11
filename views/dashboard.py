@@ -87,11 +87,13 @@ def _mini(label, value, sub="", wide=False):
 def _more_stats(b, period):
     """Secondary tiles, tucked into the sidebar behind a toggle."""
     slot = drawer()
-    on = slot.toggle("More stats", key="draft_more_stats", help="Savings rate, budgets at risk, auto entries, "
-                     "account balances, spending by person, and income and expenses over 6 months.")
+    on = slot.toggle("More stats", key="draft_more_stats", help="Net balance, savings rate, budgets at risk, "
+                     "the next auto entry, spending by person, and income and expenses over 6 months.")
     if not on:
         return
     inc, exp = b.month_totals(period)
+    p_inc, p_exp = b.month_totals(period - 1)
+    net_tile = _mini("Net balance", money(inc - exp), change_pill(inc - exp, p_inc - p_exp), wide=True)
     if inc > 0:
         rate = (inc - exp) / inc * 100
         rate_tile = _mini("Savings rate", f"{rate:.0f}%", "of income kept" if rate >= 0 else "Spending is above income")
@@ -112,11 +114,7 @@ def _more_stats(b, period):
         when = "Today" if days <= 0 else ("Tomorrow" if days == 1 else f"{nxt['next_date']:%a %d %b}")
         next_tile = _mini("Next auto entry", when, esc(f"{nxt['name']}, {money(nxt['amount'])}"), wide=True)
 
-    balances = b.balances()
-    rows = "".join(f'<div class="mini-row"><span>{esc(n)}</span><b class="{"neg" if v < 0 else ""}">{money(v)}</b></div>'
-                   for n, v in balances.items())
-    accounts = f'<div class="mini wide"><div class="mini-label">Account balances</div>{rows}</div>'
-    tiles = [rate_tile, risk_tile, next_tile, accounts]
+    tiles = [net_tile, rate_tile, risk_tile, next_tile]
 
     if b.multi_member:
         by_member = b.month_expenses(period).groupby("member")["amount"].sum().sort_values(ascending=False)
@@ -132,28 +130,42 @@ def _more_stats(b, period):
     with slot.container(key="mini-trend"):
         st.html('<div class="mini-label">Income and expenses, 6 months</div>')
         st.altair_chart(_trend_chart(b, period, height=170), width="stretch")
-    n = b.unassigned_count()
-    if n:
-        slot.caption(f"{n} older entr{'ies have' if n != 1 else 'y has'} no account, so balances may be off. "
-                     "Fix this in Categories & accounts.")
 
 
 def _panel(name, label, icon):
-    """A card that folds away. Whether it's open is remembered while you move around the app."""
-    key = f"draft_open_{name}"
-    opts = {} if key in st.session_state else {"expanded": True}
-    return st.expander(label, key=key, icon=icon, on_change="rerun", **opts)
+    """A card that folds away. Closed when the app opens and after each saved entry;
+    otherwise it stays as you left it while you move around the app."""
+    return st.expander(label, key=f"draft_open_{name}", icon=icon, on_change="rerun")
 
 
-def _accounts_tile(b):
+def _balances_tile(b):
+    """Every account's balance, the total, and what's safe to spend until payday."""
     balances = b.balances()
+    everyday = set(b.everyday_accounts)
     total = float(balances.sum()) if len(balances) else 0.0
-    held = [(n, v) for n, v in balances.sort_values(ascending=False).items() if abs(v) >= 0.005]
-    parts = [f"{esc(n)} {money(v)}" for n, v in held[:3]]
-    if len(held) > 3:
-        parts.append(f"{len(held) - 3} more")
-    sub = ", ".join(parts) if parts else f"Across {len(balances)} accounts"
-    return kpi_html("In all accounts", money(total), sub)
+    rows = "".join(
+        f'<div class="bal-row"><span>{esc(n)}{"" if n in everyday else " <i>savings</i>"}</span>'
+        f'<b class="{"neg" if v < 0 else ""}">{money(v)}</b></div>'
+        for n, v in balances.items())
+    s2s = b.safe_to_spend()
+    safe_cls = " neg" if s2s["safe"] < 0 else ""
+    detail = (f"Everyday money {money(s2s['money'])}, minus {money(s2s['bills'])} in auto bills before payday "
+              f"and {money(s2s['budget_left'])} still to spend in budgets.")
+    per_day = f"About {money(max(s2s['per_day'], 0))} a day for {s2s['days']} day{'s' if s2s['days'] != 1 else ''}. " \
+        if s2s["safe"] > 0 else "Spending is ahead of what's coming in. "
+    unassigned = b.unassigned_count()
+    note = (f'<div class="bal-note">{unassigned} older entr{"ies have" if unassigned != 1 else "y has"} no account, '
+            "so balances may be off. Fix this in Categories &amp; accounts.</div>") if unassigned else ""
+    return (
+        '<div class="kpi featured bal">'
+        '<div class="kpi-label">Account balances</div>'
+        f'<div class="kpi-value">{money(total)}</div>'
+        f'<div class="bal-rows">{rows}</div>'
+        '<div class="safe">'
+        f'<div class="safe-head"><span>Safe to spend until payday, {s2s["payday"]:%a %d %b}</span>'
+        f'<b class="{safe_cls.strip()}">{money(s2s["safe"])}</b></div>'
+        f'<div class="safe-sub">{per_day}{detail}</div></div>{note}</div>'
+    )
 
 
 def render():
@@ -170,19 +182,26 @@ def render():
 
     inc, exp = b.month_totals(period)
     p_inc, p_exp = b.month_totals(period - 1)
-    net, p_net = inc - exp, p_inc - p_exp
     kpi_grid([
-        kpi_html("Net balance", money(net), change_pill(net, p_net), featured=True),
-        _accounts_tile(b),
+        _balances_tile(b),
         kpi_html("Income", money(inc), change_pill(inc, p_inc)),
         kpi_html("Expenses", money(exp), change_pill(exp, p_exp, good_when_up=False)),
-    ], cls="four")
+    ], cls="bal-grid")
     _more_stats(b, period)
+
+    ss = st.session_state
+    if ss.pop("draft_q_just_saved", False):  # fold both panels away after an entry is saved
+        ss["draft_open_add"] = False
+        ss["draft_open_activity"] = False
+    add_open = bool(ss.get("draft_open_add"))
+    if add_open and not ss.get("_add_was_open"):
+        ss["draft_q_focus"] = True  # just opened: put the cursor in the amount box
+    ss["_add_was_open"] = add_open
 
     left, right = st.columns([2, 3], gap="medium")
     with left:
         with _panel("add", "Add an entry", ":material/add_circle:"), st.container(key="card-quick-add"):
-            entry_form("q")
+            entry_form("q", autofocus=add_open)
     with right:
         with _panel("activity", "Recent activity", ":material/history:"):
             items = activity_items(b, limit=7)

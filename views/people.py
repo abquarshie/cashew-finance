@@ -2,8 +2,9 @@ import pandas as pd
 import streamlit as st
 
 from core import auth
+from core.backup import backup_filename, export_zip
 from core.data import book
-from core.db import execute
+from core.db import execute, transact
 from ui.components import card, confirm, empty, field_msg, flash, page_header, section
 
 
@@ -58,6 +59,15 @@ def _owner_tools(user):
             auth.new_invite_code()
             flash("New invite code made. The old one no longer works.", ":material/key:")
             st.rerun()
+
+    with card("backup"):
+        section("Backups")
+        st.write("A full copy of everything (entries, budgets, goals, accounts, people) as a zip of spreadsheets. "
+                 "The daily GitHub backup keeps an encrypted copy too.")
+        st.download_button("Download a backup", data=lambda: transact(export_zip)[0],
+                           file_name=backup_filename(), mime="application/zip", icon=":material/download:",
+                           key="backup_dl", on_click="ignore")
+        st.caption("Keep it somewhere private: it includes everyone's records. To load one back in, use restore.py.")
 
     users = b.users
     with card("people"):

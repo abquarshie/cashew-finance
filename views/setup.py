@@ -143,7 +143,8 @@ def _accounts(b):
         else:
             st.dataframe(
                 pd.DataFrame({"Account": b.accts["name"], "Opening balance": b.accts["opening_balance"],
-                              "Balance now": [bal[n] for n in b.accts["name"]]}),
+                              "Balance now": [bal[n] for n in b.accts["name"]],
+                              "Everyday money": b.accts["spendable"].astype(bool)}),
                 hide_index=True, width="stretch",
                 column_config={"Opening balance": st.column_config.NumberColumn(format=f"{CURRENCY}%.2f"),
                                "Balance now": st.column_config.NumberColumn(format=f"{CURRENCY}%.2f")},
@@ -160,9 +161,11 @@ def _accounts(b):
                                       help="What the account held before your first entry here.")
             if name.lower() in lower:
                 field_msg(f"'{name}' already exists.")
+            spendable = st.checkbox("Everyday money", value=True, key="acct_add_spend",
+                                    help="Counts towards Safe to spend. Untick for savings like Susu or an emergency fund.")
             if st.button("Add account", type="primary", disabled=not name or name.lower() in lower, key="acct_add_btn",
                          icon=":material/add:"):
-                execute("INSERT INTO accounts (name, opening_balance) VALUES (%s, %s)", (name, opening))
+                execute("INSERT INTO accounts (name, opening_balance, spendable) VALUES (%s, %s, %s)", (name, opening, spendable))
                 ss.pop("acct_add_name", None)
                 ss.pop("acct_add_open", None)
                 flash(f"Added the account '{name}'")
@@ -175,6 +178,7 @@ def _accounts(b):
                 return
             sel = st.selectbox("Account", b.account_names, key="acct_edit_sel")
             cur_open = float(b.accts.loc[b.accts["name"] == sel, "opening_balance"].iloc[0])
+            cur_spend = bool(b.accts.loc[b.accts["name"] == sel, "spendable"].iloc[0])
             e1, e2 = st.columns(2)
             new_name = e1.text_input("Name", value=sel, key=f"acct_name_{sel}", max_chars=50).strip()
             new_open = e2.number_input(f"Opening balance ({CURRENCY})", value=cur_open, step=10.0, format="%.2f",
@@ -186,10 +190,13 @@ def _accounts(b):
                 field_msg(f"'{new_name}' already exists.")
             if new_open != cur_open:
                 field_msg(f"Balance now becomes {CURRENCY}{bal[sel] + new_open - cur_open:,.2f}.", "hint")
-            changed = new_name != sel or new_open != cur_open
+            new_spend = st.checkbox("Everyday money", value=cur_spend, key=f"acct_spend_{sel}",
+                                    help="Counts towards Safe to spend. Untick for savings like Susu or an emergency fund.")
+            changed = new_name != sel or new_open != cur_open or new_spend != cur_spend
             if st.button("Save changes", type="primary", disabled=not changed or not new_name or clash, key="acct_edit_save",
                          icon=":material/check:"):
-                stmts = [("UPDATE accounts SET name=%s, opening_balance=%s WHERE name=%s", (new_name, new_open, sel))]
+                stmts = [("UPDATE accounts SET name=%s, opening_balance=%s, spendable=%s WHERE name=%s",
+                          (new_name, new_open, new_spend, sel))]
                 if new_name != sel:
                     stmts += [
                         ("UPDATE transactions SET account=%s WHERE account=%s", (new_name, sel)),

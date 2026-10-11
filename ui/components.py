@@ -39,14 +39,13 @@ def empty(text):
 
 
 def flash(message, icon=":material/check_circle:"):
-    """Show a toast on the next run (survives st.rerun)."""
-    st.session_state["_flash"] = (message, icon)
+    """Show a toast on the next run (survives st.rerun). Several can queue up."""
+    st.session_state.setdefault("_flash", []).append((message, icon))
 
 
 def show_flash():
-    if "_flash" in st.session_state:
-        message, icon = st.session_state.pop("_flash")
-        st.toast(message, icon=icon)
+    for message, icon in st.session_state.pop("_flash", []):
+        st.toast(message, icon=icon, duration="long" if icon == ":material/warning:" else "short")
 
 
 # ---- KPI cards ---------------------------------------------------------------

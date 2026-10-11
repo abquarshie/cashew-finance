@@ -1,0 +1,4 @@
+# Only needed to run the tests and the backup scripts, not by the app itself.
+pytest>=8
+playwright>=1.45
+cryptography>=42

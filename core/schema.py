@@ -19,6 +19,8 @@ SEED_CATEGORIES = [
     ("Transfer", "Transfer", ["Between accounts", "Susu"]),
 ]
 SEED_ACCOUNTS = ["Cash", "GCB", "Susu", "Fidelity - Emergency", "Flip"]
+# Accounts whose names sound like savings don't count as everyday money for "Safe to spend" (editable in the app).
+SAVINGS_WORDS = "(susu|emergency|saving|invest|fixed|pension|t-bill)"
 
 TABLES = [
     """
@@ -119,6 +121,13 @@ TABLES = [
     """,
     "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS created_by VARCHAR(30)",
     "ALTER TABLE goal_contributions ADD COLUMN IF NOT EXISTS created_by VARCHAR(30)",
+    # when each entry was added (used to spot double entries); older rows stay empty
+    "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ",
+    "ALTER TABLE transactions ALTER COLUMN created_at SET DEFAULT now()",
+    # "everyday money": accounts that count towards Safe to spend. Savings-type accounts start switched off.
+    "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS spendable BOOLEAN",
+    f"UPDATE accounts SET spendable = NOT (name ~* '{SAVINGS_WORDS}') WHERE spendable IS NULL",
+    "ALTER TABLE accounts ALTER COLUMN spendable SET DEFAULT TRUE",
     # speeds up the newest-first listing as the history grows
     "CREATE INDEX IF NOT EXISTS transactions_date_idx ON transactions (date DESC, id DESC)",
 ]
@@ -138,7 +147,8 @@ def ensure_schema(conn):
                     (name, group, kind),
                 )
         for acct in SEED_ACCOUNTS:
-            cur.execute("INSERT INTO accounts (name) VALUES (%s) ON CONFLICT (name) DO NOTHING", (acct,))
+            cur.execute("INSERT INTO accounts (name, spendable) VALUES (%s, NOT (%s ~* %s)) ON CONFLICT (name) DO NOTHING",
+                        (acct, acct, SAVINGS_WORDS))
         cur.execute("INSERT INTO app_meta (key, value) VALUES ('seeded_v2', 'yes')")
     conn.commit()
     cur.close()
