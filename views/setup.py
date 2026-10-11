@@ -78,6 +78,7 @@ def _categories(b):
                     stmts += [
                         ("UPDATE transactions SET category=%s WHERE category=%s", (new_name, sel)),
                         ("UPDATE recurring_rules SET category=%s WHERE category=%s", (new_name, sel)),
+                        ("UPDATE meals.ingredients SET category=%s WHERE category=%s", (new_name, sel)),
                         ("UPDATE budgets SET category=%s WHERE category=%s "
                          "AND NOT EXISTS (SELECT 1 FROM budgets WHERE category=%s)", (new_name, sel, new_name)),
                     ]

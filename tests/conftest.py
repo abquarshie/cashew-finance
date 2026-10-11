@@ -138,7 +138,9 @@ def app_url(db_url, tmp_path_factory):
     proc = subprocess.Popen(
         [sys.executable, "-m", "streamlit", "run", "app.py", "--server.headless", "true", "--server.port", str(port),
          "--browser.gatherUsageStats", "false", "--secrets.files", str(secrets)],
-        cwd=ROOT, stdout=log, stderr=subprocess.STDOUT)
+        cwd=ROOT, stdout=log, stderr=subprocess.STDOUT,
+        # tests also change the database directly, so don't let the app hold on to old data
+        env={**os.environ, "CASHEW_CACHE_SECONDS": "1"})
     url = f"http://127.0.0.1:{port}"
     deadline = time.time() + 60
     while time.time() < deadline:

@@ -12,6 +12,10 @@ from ui import nav
 from ui.components import flash, show_flash
 from ui.login import current_user, login_screen, sign_out, write_cookie
 from ui.theme import apply_theme
+from meals.pages import fridge as meal_fridge
+from meals.pages import plan as meal_plan
+from meals.pages import recipes as meal_recipes
+from meals.pages import shopping as meal_shopping
 from views import auto, budgets, dashboard, goals, people, setup, transactions
 
 HERE = Path(__file__).parent
@@ -33,6 +37,10 @@ PAGES = [
     ("Money", auto.render, "Auto transactions", ":material/autorenew:", "auto"),
     ("Planning", budgets.render, "Budgets", ":material/donut_small:", "budgets"),
     ("Planning", goals.render, "Savings goals", ":material/savings:", "goals"),
+    ("Kitchen", meal_plan.render, "Meal plan", ":material/restaurant:", "meals"),
+    ("Kitchen", meal_shopping.render, "Shopping list", ":material/shopping_cart:", "shopping"),
+    ("Kitchen", meal_fridge.render, "Fridge & pantry", ":material/kitchen:", "fridge"),
+    ("Kitchen", meal_recipes.render, "Recipes", ":material/menu_book:", "recipes"),
     ("Settings", setup.render, "Categories & accounts", ":material/tune:", "setup"),
     ("Settings", people.render, "People & sign-in", ":material/group:", "people"),
 ]

@@ -135,9 +135,12 @@ TABLES = [
 
 def ensure_schema(conn):
     """Create or upgrade every table, and add the starting categories once. Safe to run every time."""
+    from meals.schema import ensure_meals_schema
+
     cur = conn.cursor()
     for sql in TABLES:
         cur.execute(sql)
+    ensure_meals_schema(cur)
     cur.execute("SELECT 1 FROM app_meta WHERE key = 'seeded_v2'")
     if cur.fetchone() is None:
         for group, kind, names in SEED_CATEGORIES:

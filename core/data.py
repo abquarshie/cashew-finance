@@ -4,6 +4,7 @@ Everything is read in one database trip and prepared once, then shared by every
 open session until something is saved (or for a minute, to pick up entries the
 daily job adds). Pages only read from it; they never change it in place.
 """
+import os
 from datetime import date, timedelta
 from functools import cached_property
 
@@ -20,7 +21,7 @@ FREQUENCIES = ["Weekly", "Every 2 weeks", "Monthly", "Yearly"]
 FEE_CATEGORY = "Charges"
 AUTO_PREFIX = "Auto · "
 FEE_PREFIX = "Fee · "
-TTL = 60
+TTL = int(os.environ.get("CASHEW_CACHE_SECONDS", "60"))  # tests shorten this
 
 TX_SQL = ("SELECT id, date, type, category, amount, note, member, account, to_account, created_by "
           "FROM transactions ORDER BY date DESC, id DESC")

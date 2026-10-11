@@ -8,6 +8,7 @@ from core.data import CURRENCY, book, money
 from ui.components import (activity_items, budget_html, card, change_pill, empty, esc, feed_html, kpi_grid, kpi_html,
                            page_header, pill, progress_html, section)
 from ui.entry import entry_form
+from meals.widget import today_panel
 from ui.nav import drawer, link
 
 IN_COLOR = "#1FA971"
@@ -197,6 +198,8 @@ def render():
     if add_open and not ss.get("_add_was_open"):
         ss["draft_q_focus"] = True  # just opened: put the cursor in the amount box
     ss["_add_was_open"] = add_open
+
+    today_panel()
 
     left, right = st.columns([2, 3], gap="medium")
     with left:

@@ -147,6 +147,9 @@ def test_backup_restores_exactly(conn, restore_url):
         assert restored["transactions"] == counts["transactions"]
         summary = "SELECT count(*), sum(amount), max(id) FROM transactions"
         assert q(target, summary) == q(conn, summary)
+        kitchen = "SELECT (SELECT count(*) FROM meals.recipe_items), (SELECT count(*) FROM meals.plan), " \
+                  "(SELECT coalesce(sum(qty), 0) FROM meals.pantry)"
+        assert q(target, kitchen) == q(conn, kitchen), "the kitchen is in the backup too"
         with pytest.raises(ValueError):  # won't overwrite without being told to
             restore_zip(target, data)
         target.rollback()
@@ -180,3 +183,77 @@ def test_payday_without_salary_is_next_month():
     assert pay == date(2026, 4, 1) and basis == "the 1st of next month"
     assert b.safe_to_spend(date(2026, 3, 15))["safe"] == 0
     assert (pay - timedelta(days=1)).month == 3
+
+
+# ---- kitchen arithmetic ------------------------------------------------------------------------
+from meals import logic as ml  # noqa: E402
+from meals.units import fmt as qfmt  # noqa: E402
+from meals.units import to_base  # noqa: E402
+
+RECIPES = {1: {"name": "Jollof", "portions": 4, "keeps_days": 3, "prep_note": None, "prep_hours": None},
+           2: {"name": "Red red", "portions": 4, "keeps_days": 2, "prep_note": "Soak the beans", "prep_hours": 10}}
+ITEMS = {1: [(10, 3, "pcs"), (11, 1, "kg")], 2: [(10, 3, "pcs"), (11, 500, "g"), (12, 2, "cup")]}
+D = date(2026, 10, 12)
+
+
+def plan(*entries):
+    return [dict(status="planned", **e) for e in entries]
+
+
+def test_ingredients_add_up_across_dishes():
+    e = plan({"day": D, "slot": "Supper", "recipe_id": 1, "qty": 4}, {"day": D, "slot": "Lunch", "recipe_id": 2, "qty": 4})
+    needs = ml.total_needs(e, RECIPES, ITEMS, lambda x: RECIPES[x["recipe_id"]]["name"])
+    assert needs[(10, "pcs")]["qty"] == 6, "3 onions + 3 onions"
+    assert needs[(11, "g")]["qty"] == 1500, "1 kg + 500 g"
+    assert needs[(10, "pcs")]["for"] == ["Jollof", "Red red"]
+    assert qfmt(needs[(11, "g")]["qty"], "g") == "1.5 kg"
+    assert qfmt(needs[(12, "ml")]["qty"], "ml") == "500 ml", "2 cups"
+
+
+def test_portions_scale_the_recipe():
+    e = plan({"day": D, "slot": "Supper", "recipe_id": 1, "qty": 8})
+    assert ml.total_needs(e, RECIPES, ITEMS)[(10, "pcs")]["qty"] == 6, "double portions, double onions"
+
+
+def test_counts_and_weights_stay_apart():
+    assert to_base(3, "pcs") == (3, "pcs") and to_base(0.5, "kg") == (500, "g")
+    items = {1: [(10, 3, "pcs")], 2: [(10, 500, "g")]}
+    e = plan({"day": D, "slot": "Supper", "recipe_id": 1, "qty": 4}, {"day": D, "slot": "Lunch", "recipe_id": 2, "qty": 4})
+    needs = ml.total_needs(e, RECIPES, items)
+    assert needs[(10, "pcs")]["qty"] == 3 and needs[(10, "g")]["qty"] == 500
+
+
+def test_shopping_list_subtracts_the_pantry_and_adds_low_staples():
+    needs = {(10, "pcs"): {"qty": 6.0, "for": ["Jollof"]}, (11, "g"): {"qty": 1500.0, "for": ["Jollof"]}}
+    out = ml.shopping_list(needs, pantry={(11, "g"): 2000.0, (10, "pcs"): 2.0, (14, "ml"): 100.0},
+                           low_levels={(14, "ml"): 250.0}, prices={(10, "pcs"): 1.5})
+    rows = {(r["ingredient_id"], r["base"]): r for r in out}
+    assert (11, "g") not in rows, "enough rice in the pantry"
+    assert rows[(10, "pcs")]["to_buy"] == 4 and rows[(10, "pcs")]["est"] == 6.0
+    assert rows[(14, "ml")]["reason"] == "Running low" and rows[(14, "ml")]["to_buy"] == 400
+
+
+def test_pantry_never_goes_negative():
+    new, short = ml.after_use({(10, "pcs"): 2.0}, [(10, "pcs", 3.0)])
+    assert new[(10, "pcs")] == 0 and short == [(10, "pcs", 1.0)]
+
+
+def test_leftovers_and_oldest_first():
+    assert ml.leftovers(8, 4) == 4 and ml.leftovers(3, 4) == 0
+    taken, missing = ml.take_portions([{"id": 1, "portions": 2, "eat_by": D + timedelta(days=2)},
+                                       {"id": 2, "portions": 3, "eat_by": D}], 4)
+    assert taken == [(2, 3.0), (1, 1.0)] and missing == 0
+
+
+def test_cooking_reminders():
+    from datetime import datetime
+    e = plan({"day": D + timedelta(days=1), "slot": "Breakfast", "recipe_id": 2, "qty": 4})
+    notes = ml.reminders(datetime(2026, 10, 12, 22, 0), e, RECIPES, ITEMS, {}, [], {10: "onions", 11: "rice", 12: "oil"}, 4)
+    texts = " | ".join(t for _, t in notes)
+    assert "Soak the beans now, for tomorrow's breakfast (Red red)" in texts
+    assert "Buy before cooking: 3 onions, 500 g rice, 500 ml oil" in texts
+    fridge = [{"recipe_id": 2, "label": "Red red", "portions": 4, "eat_by": D + timedelta(days=1)}]
+    notes = ml.reminders(datetime(2026, 10, 12, 8, 0), e, RECIPES, ITEMS, {}, fridge, {}, 4)
+    texts = " | ".join(t for _, t in notes)
+    assert "already in the fridge, no need to cook" in texts and "Buy before cooking" not in texts
+    assert "Eat the 4 portions of Red red by tomorrow" in texts

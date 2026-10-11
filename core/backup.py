@@ -15,11 +15,12 @@ import zipfile
 from datetime import datetime, timezone
 
 from core.schema import ensure_schema
+from meals.schema import BACKUP_TABLES as MEAL_TABLES
 
 # Restored in this order so linked rows find what they point to. Sign-in sessions are left out on purpose:
 # after a restore everyone simply signs in again.
 TABLES = ["categories", "accounts", "budgets", "users", "transactions", "recurring_rules", "goals",
-          "goal_contributions", "app_meta"]
+          "goal_contributions", "app_meta"] + MEAL_TABLES
 MAGIC = b"CASHEW-ENC1"
 
 
@@ -101,7 +102,9 @@ def restore_zip(conn, data, replace=False):
                 restored[table] = 0
                 continue
             header = next(csv.reader(io.StringIO(text)))
-            cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = %s", (table,))
+            schema, _, name = table.rpartition(".")
+            cur.execute("SELECT column_name FROM information_schema.columns WHERE table_schema = %s AND table_name = %s",
+                        (schema or "public", name))
             known = {r[0] for r in cur.fetchall()}
             unknown = [c for c in header if c not in known]
             if unknown:
