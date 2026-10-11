@@ -98,8 +98,10 @@ show_flash()
 
 # On a phone the menu covers the page; close it after a page is picked from it.
 if st.session_state.get("_last_page") not in (None, page.url_path):
+    st.session_state["_nav_count"] = st.session_state.get("_nav_count", 0) + 1
     st.html(
-        """<script>
+        f"<script>/* visit {st.session_state['_nav_count']}: changes each time, so the browser runs it again */"
+        """
         (() => {
           if (window.innerWidth > 768) return;
           const side = document.querySelector('[data-testid="stSidebar"]');

@@ -86,6 +86,22 @@ div.st-key-card-savebar { position: sticky; bottom: 14px; z-index: 20; border-co
 
 .kpi-grid.three { grid-template-columns: 1.35fr 1fr 1fr; }
 .kpi-grid.three .kpi.featured { grid-column: span 1; }
+/* net balance with "in all accounts" under it; income and expenses beside them */
+.kpi-grid.four { grid-template-columns: 1.3fr 1fr; grid-template-rows: auto auto; grid-auto-flow: column; }
+.kpi-grid.four .kpi.featured { grid-column: auto; }
+.kpi-grid.four .kpi-sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* ---- collapsible dashboard panels ---- */
+div[class*="st-key-draft_open_"] details { background: var(--card); border: 1px solid var(--line) !important;
+  border-radius: 18px !important; box-shadow: var(--shadow); overflow: hidden; }
+div[class*="st-key-draft_open_"] summary { padding: 1rem 1.2rem; background: transparent !important; }
+div[class*="st-key-draft_open_"] summary:hover p { color: var(--accent-ink); }
+div[class*="st-key-draft_open_"] summary p { font-size: 1rem; font-weight: 750; letter-spacing: -.01em; }
+div[class*="st-key-draft_open_"] [data-testid="stExpanderDetails"] { padding: 0 1.2rem 1.2rem; }
+div[class*="st-key-draft_open_"] div.st-key-card-quick-add { background: none; border: 0; box-shadow: none; padding: 0;
+  border-radius: 0; }
+div.st-key-mini-trend { border: 1px solid var(--line); border-radius: 14px; padding: .7rem .8rem .3rem; background: var(--card);
+  margin-top: 0; }
 
 /* ---- sidebar drawer tiles ---- */
 .mini-stack { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
@@ -201,8 +217,12 @@ div.st-key-quick-actions .stButton > button { border-radius: 999px; padding: .35
   [data-testid="stMainBlockContainer"], .block-container { padding: 3.2rem .85rem 5rem; }
   .page-head { margin-bottom: 1rem; }
   .page-title { font-size: 1.5rem; }
-  .kpi-grid, .kpi-grid.three { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
-  .kpi-grid.three .kpi.featured { grid-column: span 2; }
+  .kpi-grid, .kpi-grid.three, .kpi-grid.four { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
+  .kpi-grid.four { grid-template-rows: none; grid-auto-flow: row; }
+  .kpi-grid.three .kpi.featured, .kpi-grid.four .kpi.featured, .kpi-grid.four .kpi:nth-child(2) { grid-column: span 2; }
+  .kpi-grid.four .kpi:nth-child(2) .kpi-value { font-size: 1.35rem; }
+  div[class*="st-key-draft_open_"] summary { padding: .85rem .95rem; }
+  div[class*="st-key-draft_open_"] [data-testid="stExpanderDetails"] { padding: 0 .95rem 1rem; }
   .kpi { padding: .8rem .85rem; border-radius: 14px; }
   .kpi-value { font-size: 1.12rem; }
   .kpi.featured .kpi-value { font-size: 1.7rem; }

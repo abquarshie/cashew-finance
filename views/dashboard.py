@@ -17,7 +17,7 @@ SHORT = "datum.value >= 1000 ? format(datum.value / 1000, '~') + 'k' : format(da
 CAT_COLORS = ["#14A38F", "#E4572E", "#F2A541", "#5B8DEF", "#8DBF8B", "#D17A93", "#9FB0C3", "#A58BC9", "#C9A227", "#4FB0C6"]
 
 
-def _trend_chart(b, period):
+def _trend_chart(b, period, height=230):
     periods = pd.period_range(end=period, periods=6, freq="M")
     rows = []
     for p in periods:
@@ -35,7 +35,7 @@ def _trend_chart(b, period):
                             legend=alt.Legend(title=None, orient="top", direction="horizontal")),
             tooltip=["Month:N", "Type:N", alt.Tooltip("Amount:Q", format=",.2f", title=f"Amount ({CURRENCY})")],
         )
-        .properties(height=230)
+        .properties(height=height)
         .configure_view(strokeWidth=0).configure(background="transparent")
     )
 
@@ -87,8 +87,8 @@ def _mini(label, value, sub="", wide=False):
 def _more_stats(b, period):
     """Secondary tiles, tucked into the sidebar behind a toggle."""
     slot = drawer()
-    on = slot.toggle("More stats", key="more_stats", help="Savings rate, budgets at risk, auto entries, "
-                     "account balances and spending by person.")
+    on = slot.toggle("More stats", key="draft_more_stats", help="Savings rate, budgets at risk, auto entries, "
+                     "account balances, spending by person, and income and expenses over 6 months.")
     if not on:
         return
     inc, exp = b.month_totals(period)
@@ -115,8 +115,7 @@ def _more_stats(b, period):
     balances = b.balances()
     rows = "".join(f'<div class="mini-row"><span>{esc(n)}</span><b class="{"neg" if v < 0 else ""}">{money(v)}</b></div>'
                    for n, v in balances.items())
-    accounts = (f'<div class="mini wide"><div class="mini-label">In all accounts</div>'
-                f'<div class="mini-value">{money(float(balances.sum()) if len(balances) else 0)}</div>{rows}</div>')
+    accounts = f'<div class="mini wide"><div class="mini-label">Account balances</div>{rows}</div>'
     tiles = [rate_tile, risk_tile, next_tile, accounts]
 
     if b.multi_member:
@@ -130,10 +129,31 @@ def _more_stats(b, period):
             tiles.append(f'<div class="mini wide"><div class="mini-label">Spending by person, {period.strftime("%B")}</div>'
                          f'<div class="mini-people">{people}</div></div>')
     slot.html(f'<div class="mini-stack">{"".join(tiles)}</div>')
+    with slot.container(key="mini-trend"):
+        st.html('<div class="mini-label">Income and expenses, 6 months</div>')
+        st.altair_chart(_trend_chart(b, period, height=170), width="stretch")
     n = b.unassigned_count()
     if n:
         slot.caption(f"{n} older entr{'ies have' if n != 1 else 'y has'} no account, so balances may be off. "
                      "Fix this in Categories & accounts.")
+
+
+def _panel(name, label, icon):
+    """A card that folds away. Whether it's open is remembered while you move around the app."""
+    key = f"draft_open_{name}"
+    opts = {} if key in st.session_state else {"expanded": True}
+    return st.expander(label, key=key, icon=icon, on_change="rerun", **opts)
+
+
+def _accounts_tile(b):
+    balances = b.balances()
+    total = float(balances.sum()) if len(balances) else 0.0
+    held = [(n, v) for n, v in balances.sort_values(ascending=False).items() if abs(v) >= 0.005]
+    parts = [f"{esc(n)} {money(v)}" for n, v in held[:3]]
+    if len(held) > 3:
+        parts.append(f"{len(held) - 3} more")
+    sub = ", ".join(parts) if parts else f"Across {len(balances)} accounts"
+    return kpi_html("In all accounts", money(total), sub)
 
 
 def render():
@@ -153,19 +173,18 @@ def render():
     net, p_net = inc - exp, p_inc - p_exp
     kpi_grid([
         kpi_html("Net balance", money(net), change_pill(net, p_net), featured=True),
+        _accounts_tile(b),
         kpi_html("Income", money(inc), change_pill(inc, p_inc)),
         kpi_html("Expenses", money(exp), change_pill(exp, p_exp, good_when_up=False)),
-    ], cls="three")
+    ], cls="four")
     _more_stats(b, period)
 
     left, right = st.columns([2, 3], gap="medium")
     with left:
-        with card("quick-add"):
-            section("Add an entry")
+        with _panel("add", "Add an entry", ":material/add_circle:"), st.container(key="card-quick-add"):
             entry_form("q")
     with right:
-        with card("activity"):
-            section("Recent activity")
+        with _panel("activity", "Recent activity", ":material/history:"):
             items = activity_items(b, limit=7)
             if items:
                 st.html(feed_html(items, show_who=b.multi_member, names=b.name_of_user if len(b.users) > 1 else None))
@@ -173,19 +192,15 @@ def render():
             else:
                 empty("Nothing recorded yet. Add your first entry with the form on this page.")
 
-    with card("budgets"):
-        status = b.budget_status(period)
-        section("Budgets", period.strftime("%B"))
-        if status:
-            st.html(f'<div class="prog-list">{"".join(budget_html(s) for s in status)}</div>')
-        else:
-            empty("No monthly budgets yet.")
-            st.page_link(link("budgets"), label="Set a budget", icon=":material/donut_small:")
-
     left, right = st.columns([3, 2], gap="medium")
     with left:
-        with card("trend"):
-            section("Income and expenses", "Last 6 months")
-            st.altair_chart(_trend_chart(b, period), width="stretch")
+        with card("budgets"):
+            status = b.budget_status(period)
+            section("Budgets", period.strftime("%B"))
+            if status:
+                st.html(f'<div class="prog-list">{"".join(budget_html(s) for s in status)}</div>')
+            else:
+                empty("No monthly budgets yet.")
+                st.page_link(link("budgets"), label="Set a budget", icon=":material/donut_small:")
     with right:
         _spending(period)
