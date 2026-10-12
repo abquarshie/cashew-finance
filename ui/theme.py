@@ -110,7 +110,18 @@ div.st-key-card-savebar { position: sticky; bottom: 14px; z-index: 20; border-co
 .bal-note { color: var(--feature-muted); font-size: .72rem; margin-top: .5rem; }
 .kpi.featured .kpi-label, .kpi.featured .kpi-value, .bal-rows { position: relative; z-index: 1; }
 
+/* ---- Telegram preview ---- */
+.tg-preview { background: var(--neutral-soft); border-radius: 14px 14px 14px 4px; padding: .8rem .95rem; font-size: .88rem;
+  line-height: 1.5; max-width: 520px; }
+
 /* ---- kitchen ---- */
+.week-cost { border-radius: 14px; padding: .75rem .95rem; font-size: .88rem; line-height: 1.5; margin: .1rem 0 .4rem;
+  background: var(--accent-soft); color: var(--text); }
+.week-cost.warn { background: var(--warn-soft); }
+div[class*="st-key-meal-mk-"] { border-bottom: 1px solid var(--line); padding: .35rem 0 .45rem; }
+div[class*="st-key-meal-mk-"] [data-testid="stCheckbox"] label p { font-size: 1rem; font-weight: 650; }
+.mk-why { color: var(--muted); font-size: .76rem; margin: -.55rem 0 0 1.85rem; }
+.week-cost b { font-weight: 750; }
 .meal-slot { color: var(--muted); font-size: .74rem; font-weight: 700; margin: .55rem 0 -.2rem; }
 div[class*="st-key-meal-entry-"] { gap: .25rem !important; border-bottom: 1px solid var(--line); padding: .15rem 0; }
 div[class*="st-key-meal-entry-"]:last-child { border-bottom: none; }

@@ -22,7 +22,7 @@ def today_panel():
         now = datetime.now()
         todays = k.entries(today)
         soon = k.entries(today, today + timedelta(days=1))
-        notes = reminders(now, soon, k.recipes, k.items, k.pantry, k.fridge, k.names, k.household)
+        notes = reminders(now, soon, k.recipes, k.items, k.pantry, k.fridge, k.names, k.household, packs=k.packs)
         to_do = sum(1 for e in todays if e["status"] == "planned")
         label = "Today's meals"
         if todays:

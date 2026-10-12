@@ -6,8 +6,8 @@ import streamlit as st
 from core.data import money
 from meals import actions
 from meals.data import kitchen
-from meals.logic import fridge_flags
-from meals.units import base_of, fmt, from_base, to_base
+from meals.logic import fridge_flags, recipe_cost
+from meals.units import LEFTOVER_UNITS, base_of, fmt, fmt_stock, from_base, plural, to_base
 from ui.components import card, empty, esc, field_msg, flash, page_header, pill, section
 
 FLAG = {"past": ("Past eat-by", "out"), "soon": ("Eat soon", "warn"), "low": ("Running low", "warn"),
@@ -18,6 +18,12 @@ def _ate_one(batch_id, portions):
     actions.set_portions(batch_id, portions - 1)
 
 
+def _bin(batch_id, label, value_each):
+    gone = actions.throw_away(batch_id, value_each)
+    flash(f"Logged {gone:g} of {label} as thrown away" + (f" (about {money(value_each * gone)})" if value_each else ""),
+          ":material/delete:")
+
+
 def _set(batch_id, key):
     actions.set_portions(batch_id, st.session_state.get(key) or 0)
 
@@ -26,7 +32,7 @@ def _fridge(k):
     ss = st.session_state
     today = date.today()
     with card("meal-fridge"):
-        section("In the fridge", f"{sum(b['portions'] for b in k.fridge):g} portions")
+        section("In the fridge", f"{len(k.fridge)} item{'s' if len(k.fridge) != 1 else ''}")
         if not k.fridge:
             empty("Nothing in the fridge. Leftovers land here when you tick a meal as cooked.")
         for b in k.fridge:
@@ -35,16 +41,18 @@ def _fridge(k):
             eat_by = "today" if b["eat_by"] == today else ("tomorrow" if b["eat_by"] == today + timedelta(days=1)
                                                             else f"{b['eat_by']:%a %d %b}")
             row = st.container(horizontal=True, vertical_alignment="center", key=f"meal-fr-{b['id']}")
+            unit = b["unit"]
             row.html(f'<div style="min-width:0"><div class="rule-name">{esc(b["label"])}{pill(text, tone)}</div>'
-                     f'<div class="rule-meta">Cooked {b["cooked_on"]:%a %d %b}, eat by {eat_by}</div></div>',
-                     width="stretch")
+                     f'<div class="rule-meta">{b["portions"]:g} {plural(unit, b["portions"])}, cooked '
+                     f'{b["cooked_on"]:%a %d %b}, eat by {eat_by}</div></div>', width="stretch")
             key = f"meal_fr_n_{b['id']}_{b['portions']}"
             row.number_input("Portions", min_value=0.0, value=b["portions"], step=1.0, format="%g", key=key,
                              label_visibility="collapsed", width=110, on_change=_set, args=(b["id"], key))
             row.button("Ate 1", key=f"meal_fr_ate_{b['id']}", on_click=_ate_one, args=(b["id"], b["portions"]),
-                       disabled=b["portions"] < 1)
+                       disabled=b["portions"] < 1, help=f"One {unit} eaten")
+            each = recipe_cost(b["recipe_id"], k.recipes, k.items, k.prices, k.packs)[1] if b["recipe_id"] else None
             row.button("", key=f"meal_fr_bin_{b['id']}", icon=":material/delete:", type="tertiary",
-                       help="Thrown away or finished", on_click=actions.set_portions, args=(b["id"], 0))
+                       help="Thrown away: logged as food waste", on_click=_bin, args=(b["id"], b["label"], each or None))
 
     with card("meal-fridge-add"):
         section("Put something in the fridge")
@@ -53,17 +61,18 @@ def _fridge(k):
                            key="meal_fr_add_recipe")
         label = k.recipes[rid]["name"] if rid else st.text_input("What is it?", key="meal_fr_add_label",
                                                                  placeholder="e.g. Shito").strip()
-        c1, c2 = st.columns(2)
-        portions = c1.number_input("Portions", min_value=1.0, value=2.0, step=1.0, format="%g", key="meal_fr_add_n")
+        c1, c0, c2 = st.columns(3)
+        portions = c1.number_input("How many", min_value=1.0, value=2.0, step=1.0, format="%g", key="meal_fr_add_n")
+        unit = c0.selectbox("Counted in", LEFTOVER_UNITS, key="meal_fr_add_unit")
         keeps = k.recipes[rid]["keeps_days"] if rid else 3
         eat_by = c2.date_input("Eat by", value=today + timedelta(days=keeps), key=f"meal_fr_add_by_{rid}",
                                format="DD/MM/YYYY")
         if eat_by < today:
             field_msg("That eat-by date has already passed.", "warn")
         if st.button("Add to fridge", type="primary", disabled=not label, key="meal_fr_add_go", icon=":material/add:"):
-            actions.add_to_fridge(label, portions, eat_by, rid)
+            actions.add_to_fridge(label, portions, eat_by, rid, unit)
             ss.pop("meal_fr_add_label", None)
-            flash(f"Added {portions:g} portions of {label}")
+            flash(f"Added {portions:g} {plural(unit, portions)} of {label}")
             st.rerun()
 
 
@@ -83,9 +92,12 @@ def _pantry(k):
         status = "Out" if have <= 0 else ("Low" if low is not None and have <= low else "")
         per = k.prices.get((ing, base))
         rows.append({"Item": k.names.get(ing, "?"), "In stock": round(from_base(have, base, unit), 3), "Unit": unit,
+                     "On the shelf": fmt_stock(have, base, k.pack(ing)) if have > 0 else "",
                      "Status": status,
                      "Warn at": fmt(low, base) if low is not None else "",
-                     "Last price": f"{money(per * to_base(1, unit)[0])} / {unit}" if per else "",
+                     "Last price": (f"{money(per * k.pack(ing)[1])} / {k.pack(ing)[0]}" if per and k.pack(ing)
+                                    and k.pack(ing)[2] == base else
+                                    f"{money(per * to_base(1, unit)[0])} / {unit}" if per else ""),
                      "_ing": ing, "_base": base})
     table = pd.DataFrame(rows)
     only_low = st.toggle("Only show what's low or out", key="meal_pantry_low")
@@ -98,7 +110,7 @@ def _pantry(k):
         ver = ss.get("meal_pantry_ver", 0)
         edited = st.data_editor(
             view.drop(columns=["_ing", "_base"]), key=f"meal_pantry_{ver}_{only_low}", hide_index=True, width="stretch",
-            disabled=["Item", "Unit", "Status", "Warn at", "Last price"],
+            disabled=["Item", "Unit", "On the shelf", "Status", "Warn at", "Last price"],
             column_config={"In stock": st.column_config.NumberColumn("In stock", min_value=0.0, format="%g",
                                                                      help="Type what you actually have to correct it")})
         changes = []
@@ -124,6 +136,10 @@ def render():
     page_header("Fridge & pantry", "Cooked food waiting to be eaten, and the raw ingredients you have")
     tab_f, tab_p, tab_s = st.tabs(["Fridge", "Pantry", "Settings"])
     with tab_f:
+        amount, value, n = k.waste_this_month()
+        if n:
+            st.html(f'<div class="field-msg hint" style="margin:0 0 .6rem">This month: {n} lot{"s" if n != 1 else ""} '
+                    f'of food thrown away ({amount:g} portions{f", about {money(value)}" if value else ""}).</div>')
         _fridge(k)
     with tab_p:
         _pantry(k)

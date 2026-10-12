@@ -45,7 +45,8 @@ def flash(message, icon=":material/check_circle:"):
 
 def show_flash():
     for message, icon in st.session_state.pop("_flash", []):
-        st.toast(message, icon=icon, duration="long" if icon == ":material/warning:" else "short")
+        long = icon in (":material/warning:", ":material/trending_up:", ":material/trending_down:")
+        st.toast(message, icon=icon, duration="long" if long else "short")
 
 
 # ---- KPI cards ---------------------------------------------------------------

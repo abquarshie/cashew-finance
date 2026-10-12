@@ -257,3 +257,106 @@ def test_cooking_reminders():
     texts = " | ".join(t for _, t in notes)
     assert "already in the fridge, no need to cook" in texts and "Buy before cooking" not in texts
     assert "Eat the 4 portions of Red red by tomorrow" in texts
+
+
+# ---- containers, costs, ideas, waste and phone messages -----------------------------------------
+from meals.units import fmt_stock, packs_for  # noqa: E402
+
+EGG_CRATE, RICE_BAG = ("crate", 30, "pcs"), ("bag", 5000, "g")
+
+
+def test_containers_convert_and_display():
+    assert to_base(2, "crate", EGG_CRATE) == (60, "pcs")
+    assert to_base(1, "bag", RICE_BAG) == (5000, "g")
+    assert fmt_stock(36, "pcs", EGG_CRATE) == "1 crate + 6"
+    assert fmt_stock(7500, "g", RICE_BAG) == "1.5 bags (7.5 kg)"
+    assert fmt_stock(12, "pcs", EGG_CRATE) == "12", "less than a crate shows as loose"
+    assert packs_for(12, EGG_CRATE) == 1 and packs_for(31, EGG_CRATE) == 2
+
+
+def test_recipes_can_use_containers():
+    recipes = {1: {"name": "Party jollof", "portions": 20, "keeps_days": 3, "prep_note": None, "prep_hours": None}}
+    items = {1: [(20, 1, "bag"), (21, 1, "crate")]}
+    needs = ml.total_needs(plan({"day": D, "slot": "Lunch", "recipe_id": 1, "qty": 20}), recipes, items,
+                           packs={20: RICE_BAG, 21: EGG_CRATE})
+    assert needs[(20, "g")]["qty"] == 5000 and needs[(21, "pcs")]["qty"] == 30
+
+
+def test_shopping_rounds_up_to_whole_containers():
+    needs = {(21, "pcs"): {"qty": 12.0, "for": ["Eggs"]}, (20, "g"): {"qty": 6000.0, "for": ["Rice"]}}
+    out = {r["ingredient_id"]: r for r in ml.shopping_list(needs, {}, prices={(21, "pcs"): 2.0},
+                                                            packs={21: EGG_CRATE, 20: RICE_BAG})}
+    assert (out[21]["packs"], out[21]["pack"], out[21]["buy_qty"]) == (1, "crate", 30)
+    assert out[21]["est"] == 60, "priced for the whole crate you'll bring home"
+    assert out[20]["packs"] == 2, "6 kg needs two 5 kg bags"
+
+
+def test_recipe_and_week_costs():
+    prices = {(10, "pcs"): 2.0, (11, "g"): 0.02}
+    batch, each, unknown = ml.recipe_cost(1, RECIPES, ITEMS, prices)
+    assert (batch, each, unknown) == (26.0, 6.5, 0), "3 onions at 2 + 1 kg rice at 0.02/g, for 4 portions"
+    needs = ml.total_needs(plan({"day": D, "slot": "Supper", "recipe_id": 2, "qty": 4}), RECIPES, ITEMS)
+    assert ml.cost_of(needs, prices) == (16.0, 1), "oil has no price yet"
+
+
+def test_price_changes_are_flagged():
+    lines = [{"ingredient_id": 10, "name": "Tomatoes", "qty": 10, "base": "pcs", "price": 28},
+             {"ingredient_id": 11, "name": "Rice", "qty": 5000, "base": "g", "price": 100}]
+    changes = ml.price_changes(lines, {(10, "pcs"): 2.0, (11, "g"): 0.02})
+    assert [c[0] for c in changes] == ["Tomatoes"] and round(changes[0][3], 2) == 0.4
+
+
+def test_ideas_use_leftovers_and_avoid_repeats():
+    pantry = {(10, "pcs"): 10, (11, "g"): 2000, (12, "ml"): 1000}
+    fridge = [{"recipe_id": 2, "portions": 3, "eat_by": D + timedelta(days=1)}]
+    recent = plan({"day": D - timedelta(days=1), "slot": "Supper", "recipe_id": 1, "qty": 4})
+    ideas = ml.suggest(RECIPES, ITEMS, pantry, fridge, recent, D)
+    assert ideas[0]["recipe_id"] == 2 and "3 portions already in the fridge" in ideas[0]["reasons"]
+    assert all(i["recipe_id"] != 1 for i in ideas), "jollof was had yesterday"
+
+
+def test_phone_messages(conn):
+    from datetime import datetime
+
+    from core.data import Book
+    from core.data import _load_frames as money_frames
+    from meals.briefing import evening, morning
+    from meals.data import Kitchen
+    from meals.data import _load as kitchen_frames
+    k, b = Kitchen(kitchen_frames(conn)), Book(money_frames(conn))
+    text = morning(k, b, datetime.now(), 480.0)
+    assert text.startswith("☀️ <b>Good morning!") and "Safe to spend until payday" in text
+    assert "Food budget left: GH₵480.00" in text
+    assert "<script" not in text
+    msg = evening(k, datetime.now())
+    assert msg is None or msg.startswith("🌙 <b>For tomorrow")
+
+
+def test_notify_sends_to_every_chat():
+    """A stand-in for Telegram on this machine, to check what notify.py sends."""
+    import json
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    import notify
+    got = []
+
+    class Fake(BaseHTTPRequestHandler):
+        def do_POST(self):
+            got.append((self.path, json.loads(self.rfile.read(int(self.headers["Content-Length"])))))
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'{"ok": true}')
+
+        def log_message(self, *a):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Fake)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        n = notify.send("Hello <b>family</b>", "123:ABC", "111, 222", api=f"http://127.0.0.1:{server.server_port}")
+    finally:
+        server.shutdown()
+    assert n == 2
+    assert got[0][0] == "/bot123:ABC/sendMessage"
+    assert [g[1]["chat_id"] for g in got] == ["111", "222"] and got[0][1]["parse_mode"] == "HTML"

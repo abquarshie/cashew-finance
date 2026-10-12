@@ -7,7 +7,8 @@ from core.db import transact
 from meals import actions
 from meals.data import invalidate_kitchen, kitchen
 from meals.starter import load_starter
-from meals.units import UNITS, base_of, fmt, from_base, to_base
+from meals.logic import recipe_cost
+from meals.units import CONTAINERS, UNITS, base_of, fmt, from_base, plural, to_base
 from ui.components import card, confirm, empty, esc, field_msg, flash, page_header, pill, section
 
 NEW = 0
@@ -17,25 +18,26 @@ def _expense_categories():
     return money_book().category_names("Expense")
 
 
-def _recipe_cost(k, rid):
-    total, known = 0.0, True
-    for ing, qty, unit in k.items.get(rid, []):
-        q, base = to_base(qty, unit)
-        per = k.prices.get((ing, base))
-        if per is None:
-            known = False
-        else:
-            total += per * q
-    return total, known
+def cost_text(k, rid):
+    """'GH₵14.50 a portion' (or 'at least…' when some prices aren't known yet)."""
+    batch, each, unknown = recipe_cost(rid, k.recipes, k.items, k.prices, k.packs)
+    if not batch:
+        return "cost known after your first shop"
+    return f"{'at least ' if unknown else 'about '}{money(each)} a portion"
+
+
+def _line(k, ing, qty, unit):
+    pack = k.pack(ing)
+    if pack and unit == pack[0]:
+        return f"{qty:g} {plural(unit, qty)} {k.names.get(ing, '?')}"
+    return f"{fmt(*to_base(qty, unit))} {k.names.get(ing, '?')}"
 
 
 def _recipe_card(k, rid):
     r = k.recipes[rid]
     lines = k.items.get(rid, [])
-    cost, known = _recipe_cost(k, rid)
-    cost_txt = (f"about {money(cost)}" if known else f"at least {money(cost)}") if cost else "cost unknown until you shop"
-    ings = ", ".join(f"{fmt(*to_base(q, u))} {k.names.get(i, '?')}".replace(" pcs", "")
-                     for i, q, u in lines)
+    cost_txt = cost_text(k, rid)
+    ings = ", ".join(_line(k, i, q, u) for i, q, u in lines)
     prep = f'<div class="rule-meta">Ahead: {esc(r["prep_note"])} ({r["prep_hours"]} h before)</div>' \
         if r["prep_note"] and r["prep_hours"] else ""
     return (f'<div class="rule"><div style="min-width:0"><div class="rule-name">{esc(r["name"])}'
@@ -94,7 +96,8 @@ def _editor(k):
             problems.append(f"Give {ing} an amount.")
             continue
         unit = row["Unit"] if isinstance(row["Unit"], str) and row["Unit"] else k.unit_of[id_of[ing]]
-        if base_of(unit) != base_of(k.unit_of[id_of[ing]]):
+        pack = k.pack(id_of[ing])
+        if base_of(unit) != base_of(k.unit_of[id_of[ing]]) and not (pack and unit == pack[0]):
             field_msg(f"{ing} is usually counted in {k.unit_of[id_of[ing]]}; {unit} won't add up with it "
                       "on the shopping list.", "warn")
         clean.append((id_of[ing], float(qty), unit))
@@ -138,13 +141,27 @@ def _ingredients(k):
                            key="meal_ing_cat", help="Where its cost is logged when you save a shopping trip.")
         low = st.number_input(f"Warn me when stock is down to ({unit}), optional", min_value=0.0, value=None,
                               key="meal_ing_low", format="%g")
+        p1, p2 = st.columns(2)
+        pack = p1.selectbox("Bought in (optional)", [None] + CONTAINERS, key="meal_ing_pack",
+                            format_func=lambda x: "Loose / as counted" if x is None else x,
+                            help="E.g. eggs in a crate, rice in a bag, oil in a bottle.")
+        size = p2.number_input(f"Each {pack or 'container'} holds ({unit})", min_value=0.0, value=None, format="%g",
+                               key="meal_ing_pack_size", disabled=pack is None,
+                               placeholder="e.g. 30" if unit == "pcs" else "e.g. 5")
         clash = name.lower() in {n.lower() for n in k.names.values()}
         if clash:
             field_msg(f"{name} is already in your list.")
-        if st.button("Add ingredient", type="primary", disabled=not name or clash, key="meal_ing_add", icon=":material/add:"):
-            actions.add_ingredient(name, unit, cat, to_base(low, unit)[0] if low else None)
-            ss.pop("meal_ing_name", None)
-            ss.pop("meal_ing_low", None)
+        if pack and not size:
+            field_msg(f"Say how much one {pack} holds, so Cashew can count in {plural(pack)}.", "hint")
+        if pack and pack == unit:
+            field_msg("Pick a different container from the usual unit, or leave it as loose.")
+        bad_pack = bool(pack) and (not size or pack == unit)
+        if st.button("Add ingredient", type="primary", disabled=not name or clash or bad_pack, key="meal_ing_add",
+                     icon=":material/add:"):
+            actions.add_ingredient(name, unit, cat, to_base(low, unit)[0] if low else None,
+                                   pack, to_base(size, unit)[0] if pack and size else None)
+            for key in ("meal_ing_name", "meal_ing_low", "meal_ing_pack", "meal_ing_pack_size"):
+                ss.pop(key, None)
             flash(f"Added {name}")
             st.rerun()
 
@@ -158,6 +175,9 @@ def _ingredients(k):
             "Name": ing["name"], "Unit": ing["unit"], "Category": ing["category"],
             "Low at": [from_base(float(v), base_of(u), u) if v is not None and not pd.isna(v) else None
                        for v, u in zip(ing["low_level"], ing["unit"])],
+            "Bought in": [p if isinstance(p, str) and p else None for p in ing["pack_name"]],
+            "Holds": [from_base(float(v), base_of(u), u) if v is not None and not pd.isna(v) else None
+                      for v, u in zip(ing["pack_size"], ing["unit"])],
         })
         table.index = ing["id"].astype(int).tolist()
         ver = ss.get("meal_ing_ver", 0)
@@ -168,19 +188,30 @@ def _ingredients(k):
                                     "Category": st.column_config.SelectboxColumn("Money category", options=cats),
                                     "Low at": st.column_config.NumberColumn("Warn when down to", min_value=0.0,
                                                                            format="%g"),
+                                    "Bought in": st.column_config.SelectboxColumn("Bought in", options=CONTAINERS,
+                                                                                  help="Crate, bag, bottle…"),
+                                    "Holds": st.column_config.NumberColumn("Each holds (usual unit)", min_value=0.0,
+                                                                          format="%g"),
                                 })
         changed = [i for i in table.index if not table.loc[i].equals(edited.loc[i])]
         if changed:
             names = [str(n).strip().lower() for n in edited["Name"]]
+            no_size = [r["Name"] for _, r in edited.iterrows()
+                       if isinstance(r["Bought in"], str) and r["Bought in"] and (r["Holds"] is None or pd.isna(r["Holds"])
+                                                                                   or r["Holds"] <= 0)]
             if len(set(names)) != len(names) or "" in names:
                 field_msg("Each ingredient needs its own name.")
+            elif no_size:
+                field_msg("Say how much each container holds for: " + ", ".join(no_size))
             elif st.button(f"Save {len(changed)} change{'s' if len(changed) != 1 else ''}", type="primary",
                            key="meal_ing_save", icon=":material/check:"):
                 for i in changed:
                     row = edited.loc[i]
                     low = row["Low at"]
                     low_base = to_base(float(low), row["Unit"])[0] if low is not None and not pd.isna(low) else None
-                    actions.update_ingredient(int(i), str(row["Name"]), row["Unit"], row["Category"], low_base)
+                    pack = row["Bought in"] if isinstance(row["Bought in"], str) and row["Bought in"] else None
+                    size = to_base(float(row["Holds"]), row["Unit"])[0] if pack else None
+                    actions.update_ingredient(int(i), str(row["Name"]), row["Unit"], row["Category"], low_base, pack, size)
                 ss["meal_ing_ver"] = ver + 1
                 flash("Ingredients saved")
                 st.rerun()

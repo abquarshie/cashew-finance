@@ -60,6 +60,8 @@ def _owner_tools(user):
             flash("New invite code made. The old one no longer works.", ":material/key:")
             st.rerun()
 
+    _reminders()
+
     with card("backup"):
         section("Backups")
         st.write("A full copy of everything (entries, budgets, goals, accounts, people) as a zip of spreadsheets. "
@@ -138,3 +140,72 @@ def render():
         _my_account(user)
         st.caption("To invite someone or reset a password, ask the account owner.")
 
+
+
+def _as_html(text):
+    return "<br>".join(text.split("\n"))
+
+
+def _reminders():
+    """Set-up help, a preview of the messages, and a way to send a test."""
+    import json
+    import urllib.request
+    from datetime import datetime
+
+    from core.data import book as money_book
+    from meals.briefing import evening, morning
+    from meals.data import kitchen
+    from notify import food_budget_left, send
+
+    with card("reminders"):
+        section("Phone reminders (Telegram)")
+        st.write("Every morning at 6:00: today's meals, prep and shopping to do, leftovers to eat, low stock and "
+                 "safe to spend. In the evening, only when something needs doing tonight.")
+        k, b = kitchen(), money_book()
+        now = datetime.now()
+        tab_m, tab_e, tab_s = st.tabs(["Morning preview", "Evening preview", "Set up"])
+        with tab_m:
+            st.html(f'<div class="tg-preview">{_as_html(morning(k, b, now, food_budget_left(b, k, now.date())))}</div>')
+        with tab_e:
+            msg = evening(k, now)
+            if msg:
+                st.html(f'<div class="tg-preview">{_as_html(msg)}</div>')
+            else:
+                st.caption("Nothing needs doing tonight, so no evening message would be sent.")
+        with tab_s:
+            st.markdown(
+                "1. In Telegram, open **@BotFather**, send `/newbot` and follow the steps. Copy the token it gives you.\n"
+                "2. Everyone who wants reminders opens your new bot and taps **Start**. Or add the bot to a family "
+                "group and send one message there.\n"
+                "3. Paste the token below and tap **Find chats** to get the chat IDs.\n"
+                "4. In GitHub, open the repository's **Settings → Secrets and variables → Actions** and add "
+                "`TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` (several IDs separated by commas).\n"
+                "5. From the **Actions** tab, run **Phone reminders** once to check it arrives.")
+            token = st.text_input("Bot token", type="password", key="tg_token",
+                                  help="Only sent to Telegram, never saved by Cashew.")
+            if st.button("Find chats", disabled=not token, key="tg_find", icon=":material/search:"):
+                try:
+                    with urllib.request.urlopen(f"https://api.telegram.org/bot{token.strip()}/getUpdates", timeout=15) as r:
+                        updates = json.loads(r.read()).get("result", [])
+                    chats = {}
+                    for u in updates:
+                        m = u.get("message") or u.get("my_chat_member") or {}
+                        c = m.get("chat") or {}
+                        if c.get("id"):
+                            chats[c["id"]] = c.get("title") or " ".join(x for x in (c.get("first_name"), c.get("last_name")) if x)
+                    if chats:
+                        st.code(",".join(str(i) for i in chats), language=None)
+                        st.caption("Chats found: " + ", ".join(f"{n} ({i})" for i, n in chats.items()))
+                    else:
+                        st.warning("No chats yet. Open the bot in Telegram, tap Start, then try again.")
+                except Exception as exc:
+                    st.error(f"Telegram didn't answer: {exc}. Check the token.")
+            chats = st.text_input("Chat IDs", key="tg_chats", placeholder="e.g. 123456789,987654321")
+            if st.button("Send the morning message now", disabled=not (token and chats), key="tg_test",
+                         icon=":material/send:"):
+                try:
+                    n = send(morning(k, b, now, food_budget_left(b, k, now.date())), token.strip(), chats)
+                    flash(f"Sent to {n} chat{'s' if n != 1 else ''}. Check Telegram.", ":material/send:")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Couldn't send: {exc}")

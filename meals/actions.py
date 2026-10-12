@@ -9,7 +9,7 @@ import streamlit as st
 
 from core.db import invalidate, transact
 from meals.data import HOUSEHOLD_KEY, invalidate_kitchen
-from meals.logic import OPEN, entry_needs
+from meals.logic import OPEN, entry_needs, price_changes
 from meals.units import base_of, fmt, to_base
 
 
@@ -43,6 +43,13 @@ def _take_stock(cur, ing, base, qty):
     return took
 
 
+def _packs(cur):
+    """{ingredient_id: (container, size in base unit, base unit)} for converting '1 crate' and similar."""
+    cur.execute("SELECT id, unit, pack_name, pack_size FROM meals.ingredients WHERE pack_name IS NOT NULL "
+                "AND pack_size > 0")
+    return {i: (pn, float(ps), base_of(u)) for i, u, pn, ps in cur.fetchall()}
+
+
 def _recipe(cur, recipe_id):
     cur.execute("SELECT name, portions, keeps_days FROM meals.recipes WHERE id = %s", (recipe_id,))
     name, portions, keeps = cur.fetchone()
@@ -73,7 +80,7 @@ def mark_cooked(entry_id, household):
             if not e or e["status"] != OPEN or not e["recipe_id"]:
                 return []
             r, items = _recipe(cur, e["recipe_id"])
-            uses = entry_needs(e, {e["recipe_id"]: r}, {e["recipe_id"]: items})
+            uses = entry_needs(e, {e["recipe_id"]: r}, {e["recipe_id"]: items}, _packs(cur))
             removed, short = [], []
             for ing, base, q in uses:
                 took = _take_stock(cur, ing, base, q)
@@ -126,7 +133,7 @@ def mark_done(entry_id):
             e = _entry(cur, entry_id)
             if not e or e["status"] != OPEN or not e["ingredient_id"]:
                 return
-            q, base = to_base(e["qty"], e["unit"] or "pcs")
+            q, base = to_base(e["qty"], e["unit"] or "pcs", _packs(cur).get(e["ingredient_id"]))
             took = _take_stock(cur, e["ingredient_id"], base, q)
             cur.execute("UPDATE meals.plan SET status = 'done', done_at = now(), done_by = %s, undo = %s WHERE id = %s",
                         (_me(), json.dumps({"pantry": [[e["ingredient_id"], base, took]]}), e["id"]))
@@ -199,20 +206,23 @@ def set_household(n):
 
 
 # ---- ingredients and recipes -------------------------------------------------------------------
-def add_ingredient(name, unit, category, low_level=None):
+def add_ingredient(name, unit, category, low_level=None, pack_name=None, pack_size=None):
+    """pack_size is in the base unit (e.g. 30 for a crate of eggs, 5000 for a 5 kg bag of rice)."""
     def work(conn):
         with conn.cursor() as cur:
-            cur.execute("INSERT INTO meals.ingredients (name, unit, category, low_level) VALUES (%s, %s, %s, %s) "
-                        "RETURNING id", (name.strip(), unit, category, low_level))
+            cur.execute("INSERT INTO meals.ingredients (name, unit, category, low_level, pack_name, pack_size) "
+                        "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
+                        (name.strip(), unit, category, low_level, pack_name or None, pack_size or None))
             return cur.fetchone()[0]
     return _run(work)
 
 
-def update_ingredient(ing_id, name, unit, category, low_level):
+def update_ingredient(ing_id, name, unit, category, low_level, pack_name=None, pack_size=None):
     def work(conn):
         with conn.cursor() as cur:
-            cur.execute("UPDATE meals.ingredients SET name = %s, unit = %s, category = %s, low_level = %s WHERE id = %s",
-                        (name.strip(), unit, category, low_level, ing_id))
+            cur.execute("UPDATE meals.ingredients SET name = %s, unit = %s, category = %s, low_level = %s, "
+                        "pack_name = %s, pack_size = %s WHERE id = %s",
+                        (name.strip(), unit, category, low_level, pack_name or None, pack_size or None, ing_id))
     _run(work)
 
 
@@ -262,12 +272,34 @@ def set_portions(batch_id, portions):
     _run(work)
 
 
-def add_to_fridge(label, portions, eat_by, recipe_id=None):
+def add_to_fridge(label, portions, eat_by, recipe_id=None, unit="portion"):
     def work(conn):
         with conn.cursor() as cur:
-            cur.execute("INSERT INTO meals.fridge (recipe_id, label, portions, cooked_on, eat_by, created_by) "
-                        "VALUES (%s, %s, %s, %s, %s, %s)", (recipe_id, label, portions, date.today(), eat_by, _me()))
+            cur.execute("INSERT INTO meals.fridge (recipe_id, label, portions, cooked_on, eat_by, created_by, unit) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                        (recipe_id, label, portions, date.today(), eat_by, _me(), unit or "portion"))
     _run(work)
+
+
+def throw_away(batch_id, value_each=None, amount=None):
+    """Thrown away: logged as food waste (with its estimated cost) and taken out of the fridge.
+    amount defaults to everything that's left."""
+    def work(conn):
+        with conn.cursor() as cur:
+            cur.execute("SELECT label, portions, unit, recipe_id FROM meals.fridge WHERE id = %s FOR UPDATE", (batch_id,))
+            row = cur.fetchone()
+            if not row:
+                return 0.0
+            label, portions, unit, rid = row
+            gone = min(float(amount if amount is not None else portions), float(portions))
+            if gone <= 0:
+                return 0.0
+            cur.execute("INSERT INTO meals.waste (date, label, amount, unit, value, recipe_id, created_by) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                        (date.today(), label, gone, unit, round(value_each * gone, 2) if value_each else None, rid, _me()))
+            cur.execute("UPDATE meals.fridge SET portions = portions - %s WHERE id = %s", (gone, batch_id))
+            return gone
+    return _run(work)
 
 
 def set_stock(changes):
@@ -282,12 +314,12 @@ def set_stock(changes):
 
 
 # ---- shopping ---------------------------------------------------------------------------------
-def save_trip(day, account, lines):
+def save_trip(day, account, lines, shop=None):
     """Record a shopping trip in one step: what was bought goes into the pantry, prices are remembered,
     and the cost is logged in the money tracker as one expense per category.
 
     lines: [{"ingredient_id", "name", "qty" (base unit), "base", "price", "category"}]
-    Returns (trip id, {category: amount}).
+    Returns (trip id, {category: amount}, big price changes since last time).
     """
     lines = [ln for ln in lines if ln["price"] and ln["price"] > 0]
     by_cat = defaultdict(list)
@@ -297,8 +329,10 @@ def save_trip(day, account, lines):
     def work(conn):
         with conn.cursor() as cur:
             total = round(sum(ln["price"] for ln in lines), 2)
-            cur.execute("INSERT INTO meals.trips (date, account, total, created_by) VALUES (%s, %s, %s, %s) RETURNING id",
-                        (day, account, total, _me()))
+            cur.execute("SELECT ingredient_id, unit, per_unit FROM meals.prices")
+            old = {(i, u): float(p) for i, u, p in cur.fetchall()}
+            cur.execute("INSERT INTO meals.trips (date, account, total, created_by, shop) VALUES (%s, %s, %s, %s, %s) "
+                        "RETURNING id", (day, account, total, _me(), (shop or "").strip() or None))
             trip = cur.fetchone()[0]
             for ln in lines:
                 cur.execute("INSERT INTO meals.trip_items (trip_id, ingredient_id, name, qty, unit, price, category) "
@@ -312,16 +346,17 @@ def save_trip(day, account, lines):
                         (ln["ingredient_id"], ln["base"], ln["price"] / ln["qty"]))
             for cat, items in by_cat.items():
                 names = ", ".join(i["name"] for i in items[:4]) + (f" and {len(items) - 4} more" if len(items) > 4 else "")
+                where = f" at {shop.strip()}" if shop and shop.strip() else ""
                 cur.execute(
                     "INSERT INTO transactions (date, type, category, amount, note, member, account, created_by) "
                     "VALUES (%s, 'Expense', %s, %s, %s, 'Household', %s, %s)",
-                    (day, cat, round(sum(i["price"] for i in items), 2), f"Groceries (trip {trip}): {names}", account,
-                     _me()))
-            return trip
-    trip = transact(work)
+                    (day, cat, round(sum(i["price"] for i in items), 2), f"Groceries{where} (trip {trip}): {names}",
+                     account, _me()))
+            return trip, price_changes(lines, old)
+    trip, changes = transact(work)
     invalidate()          # the money side changed too
     invalidate_kitchen()
-    return trip, {c: round(sum(i["price"] for i in items), 2) for c, items in by_cat.items()}
+    return trip, {c: round(sum(i["price"] for i in items), 2) for c, items in by_cat.items()}, changes
 
 
 def describe_short(short, names):

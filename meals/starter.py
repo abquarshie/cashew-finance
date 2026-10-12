@@ -1,17 +1,20 @@
 """A few everyday Ghanaian dishes to start the recipe book with. Quantities are typical for
 4 portions; edit them to match how your family cooks."""
 
-# name, usual unit, money category, running-low level (in the usual unit, or None)
+# name, usual unit, money category, running-low level (usual unit), container it's bought in, container size (usual unit)
 INGREDIENTS = [
-    ("Rice", "kg", "Staples", 1), ("Black-eyed beans", "kg", "Staples", 0.5), ("Gari", "kg", "Staples", 0.5),
-    ("Corn dough", "kg", "Staples", None), ("Onions", "pcs", "Fruits/Veges", 3), ("Tomatoes", "pcs", "Fruits/Veges", None),
-    ("Pepper", "pcs", "Fruits/Veges", None), ("Ripe plantain", "pcs", "Fruits/Veges", None),
-    ("Green plantain", "pcs", "Fruits/Veges", None), ("Kontomire", "bunch", "Fruits/Veges", None),
-    ("Okro", "pcs", "Fruits/Veges", None), ("Ginger", "g", "Spices", 50), ("Garlic", "pcs", "Spices", 2),
-    ("Stock cubes", "pcs", "Spices", 4), ("Tomato paste", "sachet", "Canned or Sachet items", 2),
-    ("Vegetable oil", "l", "Oils", 0.5), ("Palm oil", "l", "Oils", 0.25), ("Chicken", "kg", "Meat/Fish", None),
-    ("Smoked mackerel", "pcs", "Meat/Fish", None), ("Eggs", "pcs", "Dairy/Cereal", 4), ("Milk", "tin", "Dairy/Cereal", 1),
-    ("Bread", "loaf", "Bakery", None),
+    ("Rice", "kg", "Staples", 1, "bag", 5), ("Black-eyed beans", "kg", "Staples", 0.5, "bag", 1),
+    ("Gari", "kg", "Staples", 0.5, "bag", 1), ("Corn dough", "kg", "Staples", None, None, None),
+    ("Onions", "pcs", "Fruits/Veges", 3, None, None), ("Tomatoes", "pcs", "Fruits/Veges", None, None, None),
+    ("Pepper", "pcs", "Fruits/Veges", None, None, None), ("Ripe plantain", "pcs", "Fruits/Veges", None, None, None),
+    ("Green plantain", "pcs", "Fruits/Veges", None, None, None), ("Kontomire", "bunch", "Fruits/Veges", None, None, None),
+    ("Okro", "pcs", "Fruits/Veges", None, None, None), ("Ginger", "g", "Spices", 50, None, None),
+    ("Garlic", "pcs", "Spices", 2, None, None), ("Stock cubes", "pcs", "Spices", 4, "pack", 10),
+    ("Tomato paste", "sachet", "Canned or Sachet items", 2, None, None),
+    ("Vegetable oil", "l", "Oils", 0.5, "bottle", 1.5), ("Palm oil", "l", "Oils", 0.25, "bottle", 1),
+    ("Chicken", "kg", "Meat/Fish", None, None, None), ("Smoked mackerel", "pcs", "Meat/Fish", None, None, None),
+    ("Eggs", "pcs", "Dairy/Cereal", 4, "crate", 30), ("Milk", "tin", "Dairy/Cereal", 1, None, None),
+    ("Bread", "loaf", "Bakery", None, None, None),
 ]
 
 # name, portions, keeps (days), prep note, prep hours ahead, method, [(ingredient, qty, unit)]
@@ -50,11 +53,13 @@ def load_starter(conn, expense_categories):
     fallback = "Staples" if "Staples" in expense_categories else (expense_categories[0] if expense_categories else None)
     with conn.cursor() as cur:
         ids = {}
-        for name, unit, cat, low in INGREDIENTS:
+        for name, unit, cat, low, pack, size in INGREDIENTS:
             low_base = to_base(low, unit)[0] if low is not None else None
-            cur.execute("INSERT INTO meals.ingredients (name, unit, category, low_level) VALUES (%s, %s, %s, %s) "
+            pack_base = to_base(size, unit)[0] if size else None
+            cur.execute("INSERT INTO meals.ingredients (name, unit, category, low_level, pack_name, pack_size) "
+                        "VALUES (%s, %s, %s, %s, %s, %s) "
                         "ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name RETURNING id",
-                        (name, unit, cat if cat in expense_categories else fallback, low_base))
+                        (name, unit, cat if cat in expense_categories else fallback, low_base, pack, pack_base))
             ids[name] = cur.fetchone()[0]
         added = 0
         for name, portions, keeps, note, hours, method, lines in RECIPES:

@@ -104,9 +104,31 @@ TABLES = [
     """,
 ]
 
+TABLES += [
+    # the container an item is bought and stored in, e.g. a crate of 30 eggs or a 5 kg bag of rice
+    "ALTER TABLE meals.ingredients ADD COLUMN IF NOT EXISTS pack_name VARCHAR(12)",
+    "ALTER TABLE meals.ingredients ADD COLUMN IF NOT EXISTS pack_size NUMERIC(12, 3)",  # in the base unit
+    # leftovers can be counted in portions, servings, bowls...
+    "ALTER TABLE meals.fridge ADD COLUMN IF NOT EXISTS unit VARCHAR(12) NOT NULL DEFAULT 'portion'",
+    # where a shopping trip happened (Makola, Shoprite...)
+    "ALTER TABLE meals.trips ADD COLUMN IF NOT EXISTS shop VARCHAR(60)",
+    """
+    CREATE TABLE IF NOT EXISTS meals.waste (
+        id SERIAL PRIMARY KEY,
+        date DATE NOT NULL,
+        label VARCHAR(80) NOT NULL,
+        amount NUMERIC(8, 2) NOT NULL,                 -- portions (or other leftover units) thrown away
+        unit VARCHAR(12) NOT NULL DEFAULT 'portion',
+        value NUMERIC(12, 2),                          -- estimated cost of what was thrown away
+        recipe_id INTEGER REFERENCES meals.recipes(id) ON DELETE SET NULL,
+        created_by VARCHAR(30)
+    )
+    """,
+]
+
 # Backup and restore order (parents before children).
 BACKUP_TABLES = ["meals.ingredients", "meals.recipes", "meals.recipe_items", "meals.plan", "meals.fridge",
-                 "meals.pantry", "meals.prices", "meals.trips", "meals.trip_items"]
+                 "meals.pantry", "meals.prices", "meals.trips", "meals.trip_items", "meals.waste"]
 
 
 def ensure_meals_schema(cur):

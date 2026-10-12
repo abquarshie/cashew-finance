@@ -93,10 +93,11 @@ def test_plan_and_shopping_totals(desktop, app_url, conn):
     desktop.get_by_text("Share the list").click()
     settle(desktop, 600)
     share = desktop.locator('[data-testid="stCode"]').first.inner_text()
-    assert "- Onions: 5" in share, share          # 3 + 4 needed, 2 already in the pantry
-    assert "- Rice: 750 g" in share, share        # jollof's 750 g
-    assert "- Black-eyed beans: 1 kg" in share, share  # 500 g doubled
-    assert "- Palm oil: 300 ml" in share, share   # 150 ml doubled
+    assert "- Onions: 5" in share, share            # 3 + 4 needed, 2 already in the pantry
+    assert "- Rice: 1 bag" in share, share          # 750 g needed; rice comes in 5 kg bags
+    assert "- Black-eyed beans: 1 bag" in share, share  # 500 g doubled = 1 kg = one 1 kg bag
+    assert "- Palm oil: 1 bottle" in share, share   # 150 ml doubled = 300 ml; sold in 1 l bottles
+    assert "- Garlic: 3" in share, share            # loose items stay as counted
 
 
 def test_shopping_trip_becomes_expenses(desktop, app_url, conn):
@@ -110,6 +111,8 @@ def test_shopping_trip_becomes_expenses(desktop, app_url, conn):
             "ON CONFLICT DO NOTHING")
     before_tx = q(conn, "SELECT count(*) FROM transactions")[0][0]
     sign_in(desktop, app_url, path="shopping")
+    desktop.locator('[data-testid="stButtonGroup"]').get_by_text("Table").click()  # everything ticked at once
+    settle(desktop, 1500)
     next7(desktop)
     btn = desktop.get_by_role("button", name="Save trip")
     assert btn.is_enabled()
@@ -125,7 +128,8 @@ def test_shopping_trip_becomes_expenses(desktop, app_url, conn):
     assert round(sum(float(r[1]) for r in rows), 2) == trip_total
     assert {"Fruits/Veges", "Staples", "Oils"} <= {r[0] for r in rows}
     assert stock(conn, "Onions", "pcs") == 7, "bought 5 on top of the 2 we had"
-    assert stock(conn, "Rice", "g") == 750
+    assert stock(conn, "Rice", "g") == 5000, "a whole 5 kg bag"
+    assert stock(conn, "Palm oil", "ml") == 1000, "a whole 1 l bottle"
     msgs = toasts(desktop)  # the short "Saved" note may already have faded; budget warnings stay longer
     assert "Saved GH₵" in msgs or "budget" in msgs, msgs
     # what was bought is off the list now (only staples that are running low may remain)
@@ -205,3 +209,78 @@ def test_pantry_stocktake(desktop, app_url, conn):
     no_errors(desktop)
     body = desktop.inner_text("body")
     assert "Pantry" in body and ("low" in body.lower())
+
+
+def test_market_mode_shop_and_price_changes(phone, app_url, conn):
+    """Bread, eggs and tea needs 4 eggs: the list says 1 crate. Ticking items at the stall, entering prices
+    and where, then saving."""
+    q(conn, "INSERT INTO meals.plan (day, slot, recipe_id, qty) VALUES (CURRENT_DATE + 2, 'Breakfast', %s, 4)",
+      (recipe_id(conn, "Bread, eggs and tea"),))
+    q(conn, "UPDATE meals.pantry SET qty = 0 WHERE ingredient_id IN (%s, %s)",  # the earlier trip bought a crate
+      (ing_id(conn, "Eggs"), ing_id(conn, "Bread")))
+    eggs_before = 0
+    sign_in(phone, app_url, path="shopping")
+    next7(phone)
+    rows = phone.locator('[class*="st-key-meal-mk-"]')
+    texts = [rows.nth(i).inner_text() for i in range(rows.count())]
+    egg_i = next(i for i, t in enumerate(texts) if t.startswith("Eggs"))
+    bread_i = next(i for i, t in enumerate(texts) if t.startswith("Bread"))
+    assert "Eggs · 1 crate" in texts[egg_i], texts[egg_i]
+
+    for i, price in ((egg_i, "65"), (bread_i, "15")):
+        row = phone.locator(f".st-key-meal-mk-{i}")
+        row.locator("[data-testid=stCheckbox] label").click()
+        settle(phone)
+        paid = row.get_by_role("spinbutton", name="Paid (GH₵)")
+        paid.fill(price)
+        paid.press("Enter")
+        settle(phone)
+    phone.get_by_role("combobox", name="Where (optional)").click()
+    phone.keyboard.type("Makola")
+    phone.keyboard.press("Enter")
+    settle(phone)
+    phone.get_by_role("button", name="Save trip · GH₵80.00").click()
+    settle(phone, 3000)
+    no_errors(phone)
+    shop, total = q(conn, "SELECT shop, total FROM meals.trips ORDER BY id DESC LIMIT 1")[0]
+    assert shop == "Makola" and float(total) == 80
+    assert stock(conn, "Eggs", "pcs") == eggs_before + 30, "a crate is 30 eggs"
+    notes = [r[0] for r in q(conn, "SELECT note FROM transactions WHERE note LIKE 'Groceries at Makola%%'")]
+    assert notes, "the expense says where"
+    assert "more than last time" in toasts(phone), "eggs cost far more than the remembered GH₵1 each"
+
+
+def test_week_cost_and_ideas(desktop, app_url, conn):
+    sign_in(desktop, app_url, path="meals")
+    body = desktop.inner_text("body")
+    assert "still to cook" in body and "of ingredients" in body, "the week's cost shows above the plan"
+    before = q(conn, "SELECT count(*) FROM meals.plan")[0][0]
+    ideas = desktop.locator('[class*="st-key-meal-idea-"]')
+    assert ideas.count() >= 1
+    ideas.first.get_by_role("button", name="Add").click()
+    settle(desktop, 2000)
+    no_errors(desktop)
+    assert q(conn, "SELECT count(*) FROM meals.plan")[0][0] == before + 1
+
+
+def test_waste_is_logged(desktop, app_url, conn):
+    q(conn, "INSERT INTO meals.fridge (recipe_id, label, portions, cooked_on, eat_by, unit) "
+            "VALUES (%s, 'Light soup with chicken', 2, CURRENT_DATE - 4, CURRENT_DATE - 1, 'bowl')",
+      (recipe_id(conn, "Light soup with chicken"),))
+    sign_in(desktop, app_url, path="fridge")
+    batch = q(conn, "SELECT id FROM meals.fridge WHERE label = 'Light soup with chicken' AND unit = 'bowl'")[0][0]
+    row = desktop.locator(f".st-key-meal-fr-{batch}")
+    assert "2 bowls" in row.inner_text()
+    row.get_by_role("button").last.click()   # the bin
+    settle(desktop, 2500)
+    no_errors(desktop)
+    amount, unit, value = q(conn, "SELECT amount, unit, value FROM meals.waste ORDER BY id DESC LIMIT 1")[0]
+    assert (float(amount), unit) == (2, "bowl")
+    assert value is not None and float(value) > 0, "valued from the recipe's ingredient prices"
+    assert "of food thrown away" in desktop.inner_text("body")
+
+
+def test_reminder_settings_preview(desktop, app_url):
+    sign_in(desktop, app_url, path="people")
+    body = desktop.inner_text("body")
+    assert "Phone reminders (Telegram)" in body and "Good morning!" in body

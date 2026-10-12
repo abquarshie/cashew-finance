@@ -4,8 +4,12 @@ import streamlit as st
 
 from meals import actions
 from meals.data import kitchen
-from meals.logic import OPEN, SLOTS
-from meals.units import UNITS, fmt, to_base
+import pandas as pd
+
+from core.data import book as money_book
+from core.data import money
+from meals.logic import OPEN, SLOTS, cost_of, recipe_cost, shopping_list, suggest, total_needs
+from meals.units import UNITS, fmt, plural, to_base
 from ui.components import card, empty, esc, field_msg, flash, page_header, pill
 from ui.nav import link
 
@@ -62,7 +66,9 @@ def _entry_row(k, e, today):
     if kind == "recipe":
         detail = f"{e['qty']:g} portions"
     else:
-        detail = fmt(*to_base(e["qty"], e["unit"] or "pcs"))
+        pack = k.pack(e["ingredient_id"])
+        unit = e["unit"] or "pcs"
+        detail = f"{e['qty']:g} {plural(unit, e['qty'])}" if pack and unit == pack[0] else fmt(*to_base(e["qty"], unit))
     done = e["status"] != OPEN
     label = f"{name} · {detail}" + (f" · {DONE_LABEL[e['status']]}" if done else "")
     row = st.container(horizontal=True, vertical_alignment="center", key=f"meal-entry-{e['id']}")
@@ -104,6 +110,10 @@ def _add_form(start):
                                    int(k.recipes[rid]["portions"]) if rid else max(k.household, 1),
                                    key=f"meal_add_portions_{rid}")
         if rid:
+            batch, each, unknown = recipe_cost(rid, k.recipes, k.items, k.prices, k.packs)
+            if batch:
+                field_msg(f"{'At least' if unknown else 'About'} {money(each)} a portion, "
+                          f"{money(each * portions)} for {portions}.", "hint")
             have = k.fridge_portions(rid)
             if have:
                 field_msg(f"There are {have:g} portions of this in the fridge already.", "hint")
@@ -150,11 +160,14 @@ def render():
     start = _week_start()
     today = date.today()
 
+    _week_cost(k, start, today)
+
     left, right = st.columns([2, 3], gap="medium")
     with left:
         with card("meal-add"):
             st.html('<div class="section-title">Add to the plan</div>')
             _add_form(start)
+        _suggestions(k, today)
         week = k.entries(start, start + timedelta(days=6))
         if not week:
             prev = k.entries(start - timedelta(days=7), start - timedelta(days=1))
@@ -192,3 +205,88 @@ def _day_card(k, d, today):
             st.html(f'<div class="meal-slot">{esc(slot)}</div>')
             for e in slot_entries:
                 _entry_row(k, e, today)
+
+
+def _food_budget_left(cats, today):
+    """What's left this month in the budgets that cover the kitchen's money categories."""
+    b = money_book()
+    status = b.budget_status(pd.Period(today, "M"))
+    groups = {b.group_of.get(c) for c in cats}
+    covered, left, names = set(), 0.0, []
+    for s_ in status:
+        if s_["is_group"] and s_["name"] in groups:
+            left += max(s_["limit"] - s_["spent"], 0)
+            covered.add(s_["name"])
+            names.append(s_["name"])
+    for s_ in status:
+        if not s_["is_group"] and s_["name"] in cats and b.group_of.get(s_["name"]) not in covered:
+            left += max(s_["limit"] - s_["spent"], 0)
+            names.append(s_["name"])
+    return (left, names) if names else (None, [])
+
+
+def _week_cost(k, start, today):
+    """What the rest of the week's meals cost, what's still to buy, and how that sits against the Food budget."""
+    first = max(start, today)
+    end = start + timedelta(days=6)
+    entries = k.open_entries(first, end)
+    if not entries:
+        return
+    needs = total_needs(entries, k.recipes, k.items, packs=k.packs)
+    meals_cost, unknown = cost_of(needs, k.prices)
+    to_buy = shopping_list(needs, k.pantry, prices=k.prices, packs=k.packs)
+    buy_cost = sum(r["est"] or 0 for r in to_buy)
+    buy_unknown = sum(1 for r in to_buy if r["est"] is None)
+    if not meals_cost and not buy_cost:
+        st.caption("Costs show here once you've saved a shopping trip and Cashew knows your prices.")
+        return
+    cats = {k.category_of.get(r["ingredient_id"]) for r in to_buy} | set(k.category_of.values())
+    left, names = _food_budget_left({c for c in cats if c}, today)
+    n = len(entries)
+    parts = [f"<b>{n} meal{'s' if n != 1 else ''}</b> still to cook {'this week' if start <= today else 'that week'}: "
+             f"about <b>{money(meals_cost)}</b> of ingredients"
+             + (f" (no price yet for {unknown})" if unknown else "") + "."]
+    if to_buy:
+        parts.append(f"Still to buy: about <b>{money(buy_cost)}</b>"
+                     + (f" plus {buy_unknown} item{'s' if buy_unknown != 1 else ''} with no price yet" if buy_unknown else "")
+                     + ".")
+    tone = "hint"
+    if left is not None:
+        parts.append(f"{' and '.join(names)} budget left this month: <b>{money(left)}</b>.")
+        if buy_cost > left:
+            tone = "warn"
+            parts.append("The shopping would take you over, so consider swapping a dish.")
+    st.html(f'<div class="week-cost {tone}">{" ".join(parts)}</div>')
+
+
+def _add_suggestion(rid):
+    ss = st.session_state
+    k = kitchen()
+    day = ss.get("meal_add_day") or date.today()
+    slot = ss.get("meal_add_slot") or _next_slot()
+    actions.add_to_plan(day, slot, recipe_id=rid, qty=k.recipes[rid]["portions"])
+    flash(f"Added {k.recipes[rid]['name']} to {'today' if day == date.today() else f'{day:%a %d}'}, {slot.lower()}")
+
+
+def _suggestions(k, today):
+    if not k.recipes:
+        return
+    recent = [e for e in k.plan if e["day"] >= today - timedelta(days=21)]
+    ideas = suggest(k.recipes, k.items, k.pantry, k.fridge, recent, today, packs=k.packs)
+    if not ideas:
+        return
+    ss = st.session_state
+    day = ss.get("meal_add_day") or today
+    slot = (ss.get("meal_add_slot") or _next_slot()).lower()
+    when = "today" if day == today else f"{day:%a %d}"
+    with card("meal-ideas"):
+        st.html('<div class="section-title">Ideas to use things up</div>')
+        for idea in ideas:
+            rid = idea["recipe_id"]
+            row = st.container(horizontal=True, vertical_alignment="center", key=f"meal-idea-{rid}")
+            why = "; ".join(idea["reasons"]).capitalize()
+            row.html(f'<div style="min-width:0"><div class="rule-name">{esc(k.recipes[rid]["name"])}</div>'
+                     f'<div class="rule-meta">{esc(why)}</div></div>', width="stretch")
+            row.button("Add", key=f"meal_idea_add_{rid}", icon=":material/add:", on_click=_add_suggestion, args=(rid,),
+                       help=f"Add to {when}, {slot}")
+        st.caption(f"Add puts it on {when}, {slot}: the day and meal picked above.")
