@@ -1,0 +1,31 @@
+name: Phone reminders
+
+on:
+  schedule:
+    - cron: "0 6 * * *"     # 06:00 Ghana time
+    - cron: "30 18 * * *"   # 18:30, only sends if something needs doing
+  workflow_dispatch:
+    inputs:
+      which:
+        description: "morning or evening"
+        default: "morning"
+
+jobs:
+  remind:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Send the message
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then MODE="${{ github.event.inputs.which }}";
+          elif [ "${{ github.event.schedule }}" = "30 18 * * *" ]; then MODE=evening; else MODE=morning; fi
+          python notify.py "$MODE"
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
