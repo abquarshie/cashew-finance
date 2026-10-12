@@ -92,16 +92,25 @@ def test_dashboard_layout(phone, app_url):
     balances = tiles.nth(0).inner_text()
     assert "Safe to spend until payday" in balances
     assert "MoMo" in balances and "savings" in balances, "every account listed, savings marked"
+    assert tiles.nth(0).locator(".kpi-value").count() == 0, "the total lives in More stats, not on the dashboard"
 
     assert not amount_box(phone).is_visible(), "Add an entry starts closed"
     assert not phone.get_by_text("See all transactions").is_visible(), "Recent activity starts closed"
+    for panel in ("Budgets", "Where the money went"):
+        assert phone.locator(f'[data-testid="stExpander"] summary:has-text("{panel}")').count() == 1
+    assert not phone.locator(".prog-list").first.is_visible(), "Budgets starts closed"
+    assert not phone.locator('.st-key-draft_open_spending [data-testid="stExpanderDetails"]').is_visible(), \
+        "Where the money went starts closed"
+    phone.locator('[data-testid="stExpander"] summary:has-text("Budgets")').click()
+    settle(phone)
+    assert phone.locator(".prog-list").first.is_visible()
 
     open_menu(phone)
     sidebar = phone.locator('[data-testid="stSidebar"]')
     sidebar.get_by_text("More stats").click()
     settle(phone, 2000)
     side = sidebar.inner_text()
-    for tile in ("Net balance", "Savings rate", "Budgets at risk", "Next auto entry", "Income and expenses, 6 months"):
+    for tile in ("In all accounts", "Net balance", "Savings rate", "Budgets at risk", "Next auto entry", "Income and expenses, 6 months"):
         assert tile in side
     assert "Account balances" not in side, "balances moved to the dashboard"
     assert sidebar.locator('[data-testid="stVegaLiteChart"], .vega-embed').count() >= 1
@@ -116,6 +125,10 @@ def test_quick_entry_in_four_taps(phone, app_url, conn):
     phone.wait_for_function("() => { const a = document.activeElement; "
                             "return a && a.getAttribute('aria-label') === 'Amount (GH₵)' "
                             "&& a.getAttribute('inputmode') === 'decimal'; }", timeout=5000)
+    phone.locator('[data-testid="stExpander"] summary:has-text("Where the money went")').click()
+    settle(phone)
+    spending = phone.locator('.st-key-draft_open_spending [data-testid="stExpanderDetails"]')
+    assert spending.is_visible()
 
     type_in(amt, "38.5")
     pick_category(phone, "Staples")
@@ -124,6 +137,7 @@ def test_quick_entry_in_four_taps(phone, app_url, conn):
     assert (kind, cat, float(amount), when, by) == ("Expense", "Staples", 38.5, date.today(), "xan")
     assert not amount_box(phone).is_visible(), "Add an entry folds away after saving"
     assert not phone.get_by_text("See all transactions").is_visible()
+    assert not spending.is_visible(), "Where the money went folds away too"
     assert "Saved GH₵38.50 expense to Staples" in toasts(phone)
 
 
