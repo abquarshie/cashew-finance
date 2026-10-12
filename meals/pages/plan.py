@@ -8,10 +8,10 @@ import pandas as pd
 
 from core.data import book as money_book
 from core.data import money
-from meals.logic import OPEN, SLOTS, cost_of, recipe_cost, shopping_list, suggest, total_needs
-from meals.units import UNITS, fmt, plural, to_base
+from meals.logic import OPEN, SLOTS, cost_of, recipe_cost, reminders, shopping_list, suggest, total_needs
+from meals.units import fmt, units_for, plural, to_base
 from ui.components import card, empty, esc, field_msg, flash, page_header, pill
-from ui.nav import link
+from ui.nav import go
 
 WEEKS = {-1: "Last week", 0: "This week", 1: "Next week", 2: "In 2 weeks"}
 DONE_LABEL = {"cooked": "Cooked", "from_fridge": "From the fridge", "done": "Eaten"}
@@ -101,8 +101,8 @@ def _add_form(start):
 
     if what == "Recipe":
         if not k.recipes:
-            field_msg("Add a recipe first, on the Recipes page.", "hint")
-            st.page_link(link("recipes"), label="Open recipes", icon=":material/menu_book:")
+            field_msg("Add a recipe first, under Meals → Recipes.", "hint")
+            go("meals", "Recipes", label="Open recipes", icon=":material/menu_book:")
             return
         rid = st.selectbox("Recipe", list(k.recipes), index=None, placeholder="Choose a dish",
                            format_func=lambda i: k.recipes[i]["name"], key="meal_add_recipe")
@@ -125,15 +125,14 @@ def _add_form(start):
         args = dict(recipe_id=rid, qty=portions)
     else:
         if not k.names:
-            field_msg("Add ingredients first, on the Recipes page.", "hint")
+            field_msg("Add ingredients first, under Meals → Recipes.", "hint")
             return
         ing = st.selectbox("Item", list(k.names), index=None, placeholder="e.g. Bananas",
                            format_func=lambda i: k.names[i], key="meal_add_item")
         c1, c2 = st.columns(2)
         qty = c1.number_input("How much", min_value=0.0, value=None, placeholder="0", key="meal_add_qty", format="%g")
-        units = UNITS
-        unit = c2.selectbox("Unit", units, index=units.index(k.unit_of[ing]) if ing else units.index("pcs"),
-                            key=f"meal_add_unit_{ing}")
+        units = units_for(k.unit_of[ing], k.pack(ing)) if ing else ["pcs"]
+        unit = c2.selectbox("Unit", units, key=f"meal_add_unit_{ing}")
         ok = ing is not None and bool(qty)
         args = dict(ingredient_id=ing, qty=qty or 0, unit=unit)
 
@@ -160,23 +159,13 @@ def render():
     start = _week_start()
     today = date.today()
 
+    _copy_offer(k, start, today)
+    if start <= today <= start + timedelta(days=6):
+        _reminders(k, today)
     _week_cost(k, start, today)
 
-    left, right = st.columns([2, 3], gap="medium")
-    with left:
-        with card("meal-add"):
-            st.html('<div class="section-title">Add to the plan</div>')
-            _add_form(start)
-        _suggestions(k, today)
-        week = k.entries(start, start + timedelta(days=6))
-        if not week:
-            prev = k.entries(start - timedelta(days=7), start - timedelta(days=1))
-            if prev and st.button(f"Copy the week before ({len(prev)} meals)", icon=":material/content_copy:",
-                                  key="meal_copy"):
-                n = actions.copy_week(start - timedelta(days=7), start)
-                flash(f"Copied {n} meals")
-                st.rerun()
-    with right:
+    days_col, add_col = st.columns([3, 2], gap="medium")  # on a phone the days come first, the form after
+    with days_col:
         days = [start + timedelta(days=i) for i in range(7)]
         past = [d for d in days if d < today]
         if past:  # days already gone fold away, so today is at the top
@@ -188,6 +177,41 @@ def render():
         for d in days:
             if d >= today:
                 _day_card(k, d, today)
+    with add_col:
+        with card("meal-add"):
+            st.html('<div class="section-title">Add to the plan</div>')
+            _add_form(start)
+        _suggestions(k, today)
+
+
+def _reminders(k, today):
+    """Soak the beans, defrost the fish, eat the leftovers: what needs doing today and tomorrow."""
+    notes = reminders(datetime.now(), k.entries(today, today + timedelta(days=1)), k.recipes, k.items, k.pantry,
+                      k.fridge, k.names, k.household, packs=k.packs)
+    for tone, text in notes:
+        field_msg(text, {"warn": "warn", "info": "hint", "ok": "ok"}[tone])
+
+
+def _copy_offer(k, start, today):
+    """Most weeks look like the last one: copy it in one tap, then change what's different."""
+    if start + timedelta(days=6) < today:
+        return
+    have = {(e["day"], e["slot"]) for e in k.entries(start, start + timedelta(days=6))}
+    prev = k.entries(start - timedelta(days=7), start - timedelta(days=1))
+    fits = [e for e in prev if e["day"] + timedelta(days=7) >= today
+            and (e["day"] + timedelta(days=7), e["slot"]) not in have]
+    if not fits:
+        return
+    n = len(fits)
+    label = (f"Copy the week before ({n} meal{'s' if n != 1 else ''})" if not have else
+             f"Fill the empty meals from the week before ({n})")
+    if st.button(label, icon=":material/content_copy:", key="meal_copy", width="stretch",
+                 type="primary" if not have else "secondary",
+                 help="Meals you've already planned this week stay as they are."):
+        copied = actions.copy_week(start - timedelta(days=7), start, not_before=today)
+        flash(f"Copied {copied} meal{'s' if copied != 1 else ''}. Change anything that's different this week.",
+              ":material/content_copy:")
+        st.rerun()
 
 
 def _day_card(k, d, today):

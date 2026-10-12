@@ -12,11 +12,8 @@ from ui import nav
 from ui.components import flash, show_flash
 from ui.login import current_user, login_screen, sign_out, write_cookie
 from ui.theme import apply_theme
-from meals.pages import fridge as meal_fridge
-from meals.pages import plan as meal_plan
-from meals.pages import recipes as meal_recipes
 from meals.pages import shopping as meal_shopping
-from views import auto, budgets, dashboard, goals, people, setup, transactions
+from views import dashboard, sections
 
 HERE = Path(__file__).parent
 st.set_page_config(page_title="Cashew", page_icon=str(HERE / "assets" / "icon.svg"), layout="wide",
@@ -31,19 +28,17 @@ except Exception as exc:
 
 PAGES = [
     # (group, run, title, icon, url)
-    ("", dashboard.render, "Dashboard", ":material/space_dashboard:", "dashboard"),
-    ("Money", transactions.render_add, "Add transaction", ":material/add_circle:", "add"),
-    ("Money", transactions.render, "Transactions", ":material/receipt_long:", "transactions"),
-    ("Money", auto.render, "Auto transactions", ":material/autorenew:", "auto"),
-    ("Planning", budgets.render, "Budgets", ":material/donut_small:", "budgets"),
-    ("Planning", goals.render, "Savings goals", ":material/savings:", "goals"),
-    ("Kitchen", meal_plan.render, "Meal plan", ":material/restaurant:", "meals"),
+    ("", dashboard.render, "Home", ":material/home:", "dashboard"),
+    ("Money", sections.money, "Transactions", ":material/receipt_long:", "transactions"),
+    ("Money", sections.plan, "Budgets & goals", ":material/donut_small:", "budgets"),
+    ("Kitchen", sections.kitchen, "Meals", ":material/restaurant:", "meals"),
     ("Kitchen", meal_shopping.render, "Shopping list", ":material/shopping_cart:", "shopping"),
-    ("Kitchen", meal_fridge.render, "Fridge & pantry", ":material/kitchen:", "fridge"),
-    ("Kitchen", meal_recipes.render, "Recipes", ":material/menu_book:", "recipes"),
-    ("Settings", setup.render, "Categories & accounts", ":material/tune:", "setup"),
-    ("Settings", people.render, "People & sign-in", ":material/group:", "people"),
+    ("Settings", sections.settings, "Settings", ":material/settings:", "settings"),
 ]
+# Old addresses (bookmarks, links in messages) still open the right place.
+OLD = {"add": ("dashboard", None), "auto": ("transactions", "Repeats"), "goals": ("budgets", "Goals"),
+       "fridge": ("meals", "Fridge"), "recipes": ("meals", "Recipes"), "setup": ("settings", "Accounts"),
+       "people": ("settings", "People")}
 
 user = current_user()
 
@@ -51,7 +46,7 @@ user = current_user()
 if user is None:
     show_flash()
     signin_pages = [st.Page(login_screen, title="Sign in", url_path=url, default=(i == 0))
-                    for i, (_, _, _, _, url) in enumerate(PAGES)]
+                    for i, url in enumerate([p[4] for p in PAGES] + list(OLD))]
     st.navigation(signin_pages, position="hidden").run()
     st.stop()
 
@@ -81,9 +76,19 @@ if book().auto_due():
 
 groups = {}
 for group, run, title, icon, url in PAGES:
+    if group == "Kitchen" and not book().feature("kitchen"):
+        continue
     pg = st.Page(run, title=title, icon=icon, url_path=url, default=(url == "dashboard"))
     groups.setdefault(group, []).append(pg)
     nav.PAGES[url] = pg
+for old, (new, tab) in OLD.items():
+    if new not in nav.PAGES:
+        continue
+    def _redirect(new=new, tab=tab):
+        if tab:
+            st.session_state[f"tab_{new}"] = tab
+        st.switch_page(nav.PAGES[new])
+    groups.setdefault("", []).append(st.Page(_redirect, title=old, url_path=old, visibility="hidden"))
 page = st.navigation(groups, position="sidebar")
 
 st.logo(str(HERE / "assets" / "logo.svg"), icon_image=str(HERE / "assets" / "icon.svg"), size="large")

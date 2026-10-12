@@ -139,15 +139,19 @@ def _ingredients(k):
         default_cat = "Staples" if "Staples" in cats else (cats[0] if cats else None)
         cat = c2.selectbox("Money category", cats, index=cats.index(default_cat) if default_cat in cats else 0,
                            key="meal_ing_cat", help="Where its cost is logged when you save a shopping trip.")
-        low = st.number_input(f"Warn me when stock is down to ({unit}), optional", min_value=0.0, value=None,
-                              key="meal_ing_low", format="%g")
-        p1, p2 = st.columns(2)
-        pack = p1.selectbox("Bought in (optional)", [None] + CONTAINERS, key="meal_ing_pack",
-                            format_func=lambda x: "Loose / as counted" if x is None else x,
-                            help="E.g. eggs in a crate, rice in a bag, oil in a bottle.")
-        size = p2.number_input(f"Each {pack or 'container'} holds ({unit})", min_value=0.0, value=None, format="%g",
-                               key="meal_ing_pack_size", disabled=pack is None,
-                               placeholder="e.g. 30" if unit == "pcs" else "e.g. 5")
+        busy = bool(ss.get("meal_ing_pack") or ss.get("meal_ing_low"))
+        with st.expander("Bought in a crate, bag or bottle? Low-stock warning?", icon=":material/inventory_2:",
+                         expanded=busy):
+            p1, p2 = st.columns(2)
+            pack = p1.selectbox("Bought in", [None] + CONTAINERS, key="meal_ing_pack",
+                                format_func=lambda x: "Loose / as counted" if x is None else x,
+                                help="E.g. eggs in a crate, rice in a bag, oil in a bottle. Then you can say "
+                                     "\"2 crates\" and Cashew does the sums.")
+            size = p2.number_input(f"Each {pack or 'container'} holds ({unit})", min_value=0.0, value=None,
+                                   format="%g", key="meal_ing_pack_size", disabled=pack is None,
+                                   placeholder="e.g. 30" if unit == "pcs" else "e.g. 5")
+            low = st.number_input(f"Warn me when stock is down to ({unit})", min_value=0.0, value=None,
+                                  key="meal_ing_low", format="%g")
         clash = name.lower() in {n.lower() for n in k.names.values()}
         if clash:
             field_msg(f"{name} is already in your list.")

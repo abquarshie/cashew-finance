@@ -245,7 +245,7 @@ def _accounts(b):
 
 def render():
     b = book()
-    page_header("Categories & accounts", "Shape the app around how your family handles money")
+    page_header("Accounts & categories", "Shape the app around how your family handles money")
     tab_cats, tab_accts = st.tabs(["Categories", "Accounts"])
     with tab_cats:
         _categories(b)

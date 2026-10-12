@@ -6,7 +6,7 @@ import pytest
 
 from conftest import OWNER, q
 from core.auth import hash_password
-from helpers import chip, go, no_errors, settle, sign_in, toasts
+from helpers import chip, go, no_errors, settle, sign_in, tab, toasts
 
 pytestmark = pytest.mark.browser
 JOLLOF, REDRED = "Jollof rice with chicken", "Red red"
@@ -167,7 +167,7 @@ def test_cooking_uses_the_pantry_and_fills_the_fridge(desktop, app_url, conn):
 
     desktop.locator(f".st-key-meal-entry-{red}").locator("[data-testid=stCheckbox] label").click()
     settle(desktop, 2500)
-    go(desktop, "Fridge & pantry")
+    tab(desktop, "Fridge")
     assert REDRED in desktop.inner_text("body")
 
 
@@ -192,14 +192,29 @@ def test_dashboard_shows_todays_meals(phone, app_url, conn):
     q(conn, "INSERT INTO meals.fridge (label, portions, cooked_on, eat_by) VALUES ('Shito', 1, %s, %s)",
       (date.today() - timedelta(days=3), date.today()))
     sign_in(phone, app_url)
-    panel = phone.locator(".st-key-draft_open_meals")
-    text = panel.inner_text()
-    assert "Today's meals" in text and "reminder" in text
-    assert JOLLOF in text, "today's supper is listed"
-    assert "Eat the 1 portion of Shito by today" in text
-    # the money side is untouched by the kitchen
-    tiles = phone.locator(".kpi-grid .kpi")
-    assert tiles.count() == 3
+    line = phone.locator(".st-key-card-meal-line").inner_text()
+    assert JOLLOF in line and "reminder" in line, line
+    assert phone.locator(".kpi-grid .kpi").count() == 2, "the money side is untouched by the kitchen"
+    phone.locator(".st-key-card-meal-line a").click()
+    settle(phone, 2500)
+    assert "/meals" in phone.url
+    assert "Eat the 1 portion of Shito by today" in phone.inner_text("body"), "reminders show on the plan"
+
+
+def test_copy_last_week(desktop, app_url, conn):
+    monday = date.today() - timedelta(days=date.today().weekday())
+    q(conn, "INSERT INTO meals.plan (day, slot, recipe_id, qty) VALUES (%s, 'Lunch', %s, 4), (%s, 'Supper', %s, 4)",
+      (monday - timedelta(days=1), recipe_id(conn, REDRED), monday - timedelta(days=1), recipe_id(conn, JOLLOF)))
+    sign_in(desktop, app_url, path="meals")
+    desktop.locator('[data-testid="stButtonGroup"]').get_by_text("Next week").click()
+    settle(desktop, 2000)
+    before = q(conn, "SELECT count(*) FROM meals.plan WHERE day >= %s", (monday + timedelta(days=7),))[0][0]
+    desktop.get_by_role("button", name="Copy the week before").click()
+    settle(desktop, 2500)
+    no_errors(desktop)
+    after = q(conn, "SELECT count(*) FROM meals.plan WHERE day >= %s", (monday + timedelta(days=7),))[0][0]
+    assert after > before
+    assert not desktop.get_by_role("button", name="Copy the week before").count(), "nothing left to copy"
 
 
 def test_pantry_stocktake(desktop, app_url, conn):
@@ -281,6 +296,6 @@ def test_waste_is_logged(desktop, app_url, conn):
 
 
 def test_reminder_settings_preview(desktop, app_url):
-    sign_in(desktop, app_url, path="people")
+    sign_in(desktop, app_url, path="settings?tab_settings=Reminders")
     body = desktop.inner_text("body")
-    assert "Phone reminders (Telegram)" in body and "Good morning!" in body
+    assert "What gets sent" in body and "Good morning!" in body

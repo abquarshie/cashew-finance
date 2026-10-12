@@ -3,3 +3,4 @@ pandas
 altair
 python-dateutil
 psycopg2-binary
+cryptography

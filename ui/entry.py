@@ -1,12 +1,12 @@
-"""The add-transaction form, shown on the dashboard and on the Add transaction page.
+"""The add-entry form. It opens as a pop-up from the Add button on Home and on Money.
 
 Built for speed on a phone: type the amount, tap a category, tap Save.
-- Your most-used categories and accounts are one-tap chips; everything else is
-  one search away.
-- The date is Today unless you tap Yesterday or pick another day.
+- Three things up front: amount, category and account. The category and account you
+  used last are already picked, and your most-used ones are one-tap chips.
+- Date, note, who it was for and any fee sit under "More details". The date is Today
+  unless you change it there.
 - After a category is picked, "Same as last time" fills in the last amount used.
-- The form runs as a fragment, so typing and tapping only redraw the form,
-  not the charts around it. What you've typed is kept if you switch pages.
+- The form runs as a fragment, so typing and tapping only redraw the form.
 """
 from datetime import date, timedelta
 
@@ -106,47 +106,6 @@ def _entry_date(prefix):
     return picked or date.today()
 
 
-def _keypad():
-    """Money boxes get the phone's decimal keypad, including when Streamlit redraws them."""
-    st.html(
-        """<script>
-        (() => {
-          if (window.__cashewKeypad) return;
-          window.__cashewKeypad = true;
-          const mark = () => document.querySelectorAll('[class*="st-key-draft_"][class*="_amount"] input, '
-            + '[class*="st-key-draft_"][class*="_fee"] input').forEach(i => {
-              if (i.getAttribute('inputmode') !== 'decimal') i.setAttribute('inputmode', 'decimal');
-            });
-          new MutationObserver(mark).observe(document.body, {childList: true, subtree: true});
-          mark();
-        })();
-        </script>""",
-        unsafe_allow_javascript=True,
-        width="content",
-    )
-
-
-def _focus_amount(prefix):
-    """Put the cursor in the amount box."""
-    n = st.session_state["_focus_n"] = st.session_state.get("_focus_n", 0) + 1
-    st.html(
-        f"""<script>/* request {n}: changes each time so the browser runs it again */
-        (() => {{
-          let tries = 0;
-          const go = () => {{
-            const el = document.querySelector('.st-key-{_k(prefix, "amount")} input');
-            if (!el) {{ if (tries++ < 40) setTimeout(go, 50); return; }}  // the box may not be drawn yet
-            const a = document.activeElement;
-            if (!a || a === document.body) el.focus({{preventScroll: true}});
-          }};
-          go();
-        }})();
-        </script>""",
-        unsafe_allow_javascript=True,
-        width="content",
-    )
-
-
 def _set_choice(key, value):
     st.session_state[key] = value
     st.session_state[key + "__last"] = value
@@ -208,7 +167,7 @@ def _apply_momo(prefix):
 
     tips = [("ok", momo.describe(found) + ". Check the details, then save.")]
     if not acct:
-        tips.append(("hint", "Tip: add an account called MoMo in Categories & accounts and these will go there "
+        tips.append(("hint", "Tip: add an account called MoMo in Settings → Accounts and these will go there "
                              "automatically."))
     elif found["balance"] is not None:
         sign = 1 if kind == "Income" or found["direction"] == "cash_in" else -1
@@ -334,10 +293,9 @@ def _save(prefix, values, confirmed=False):
     ss[_k(prefix, "fee")] = None
     ss[_k(prefix, "note")] = ""
     ss[_k(prefix, "dup")] = None
+    _set_choice(_k(prefix, "when"), "Today")  # the date is tucked away, so never carry an old one over silently
     _clear_momo(prefix)
     ss[_k(prefix, "saved")] = True
-    ss[_k(prefix, "just_saved")] = True
-    ss[_k(prefix, "focus")] = True
 
 
 def _cancel_dup(prefix):
@@ -361,11 +319,11 @@ def _momo_box(prefix):
 
 
 @st.fragment
-def entry_form(prefix, autofocus=True):
+def entry_form(prefix):
     ss = st.session_state
     b = book()
     if not b.account_names:
-        st.warning("Add an account first in **Categories & accounts**.")
+        st.warning("Add an account first in **Settings → Accounts**.")
         return
 
     _momo_box(prefix)
@@ -379,7 +337,7 @@ def entry_form(prefix, autofocus=True):
 
     names = b.category_names(kind)
     if not names:
-        st.warning(f"There are no {kind.lower()} categories yet. Add one in **Categories & accounts**.")
+        st.warning(f"There are no {kind.lower()} categories yet. Add one in **Settings → Accounts**.")
         return
 
     amount = st.number_input(f"Amount ({CURRENCY})", min_value=0.0, value=None, step=1.0, format="%.2f",
@@ -400,9 +358,6 @@ def entry_form(prefix, autofocus=True):
         cat_key = _k(prefix, "cat_Transfer")
         _ensure(cat_key, names, b.default_category("Transfer"))
         category = _chips("Purpose", names[:TOP_N], cat_key, all_options=names, search_label="Other purpose")
-        fee = st.number_input(f"Fee ({CURRENCY}), optional", min_value=0.0, value=None, step=0.5, format="%.2f",
-                              placeholder="0.00", key=_k(prefix, "fee"),
-                              help=f"MoMo or bank charges. Saved as a separate {FEE_CATEGORY} expense.")
     else:
         cat_key, acct_key = _k(prefix, f"cat_{kind}"), _k(prefix, f"acct_{kind}")
         _ensure(cat_key, names, b.default_category(kind))
@@ -414,25 +369,10 @@ def entry_form(prefix, autofocus=True):
             st.button(f"Same as last time: {money(last)}", key=f"{prefix}_last_{kind}", type="tertiary",
                       icon=":material/history:", on_click=_fill_amount, args=(prefix, last))
         account = _account_chips(b, "Account", acct_key)
-        if ss.get(_k(prefix, "fee")):  # MoMo texts often include a fee
-            fee = st.number_input(f"Fee ({CURRENCY})", min_value=0.0, value=None, step=0.5, format="%.2f",
-                                  placeholder="0.00", key=_k(prefix, "fee"),
-                                  help=f"Saved as a separate {FEE_CATEGORY} expense from the same account.")
 
-    when = _entry_date(prefix)
-    st.text_input("Note", key=_k(prefix, "note"), placeholder="Optional, e.g. Makola market",
-                  label_visibility="collapsed")
-
-    if kind != "Transfer":
-        who_key = _k(prefix, "who")
-        members = b.members()
-        if ss.get(who_key) and ss[who_key] not in members:
-            members = members + [ss[who_key]]
-        _ensure(who_key, members, SHARED)
-        with st.expander(f"For: {ss[who_key]}", icon=":material/person:"):
-            who = st.selectbox("Who is this for?", members, key=who_key, accept_new_options=True,
-                               help=f"{SHARED} means shared by everyone. Type a name to add someone.")
-        who = (who or SHARED).strip() or SHARED
+    when = _details(prefix, b, kind)
+    who = SHARED if kind == "Transfer" else ((ss.get(_k(prefix, "who")) or SHARED).strip() or SHARED)
+    fee = ss.get(_k(prefix, "fee"))
 
     if kind == "Transfer" and account == to_acct:
         errors.append("same")
@@ -461,14 +401,54 @@ def entry_form(prefix, autofocus=True):
         if not amount and not errors:
             field_msg("Enter an amount to save.", "hint")
 
-    _keypad()
-    want_focus = ss.get(_k(prefix, "focus")) or _k(prefix, "seen") not in ss
-    if want_focus and autofocus:
-        ss.pop(_k(prefix, "focus"), None)
-        _focus_amount(prefix)
-    ss[_k(prefix, "seen")] = True
     if ss.pop(_k(prefix, "saved"), False):
-        st.rerun()  # refresh the whole page so totals and recent activity include the new entry
+        st.rerun()  # closes the pop-up and refreshes the page, so totals include the new entry
+
+
+def _details(prefix, b, kind):
+    """Date, note, who it was for and fee: folded away unless one of them is already filled in."""
+    ss = st.session_state
+    when_now = ss.get(_k(prefix, "when")) or "Today"
+    note_now = (ss.get(_k(prefix, "note")) or "").strip()
+    who_now = ss.get(_k(prefix, "who")) or SHARED
+    fee_now = ss.get(_k(prefix, "fee"))
+    bits = [when_now if when_now != "Other day" else "another day"]
+    if note_now:
+        bits.append("note")
+    if kind != "Transfer" and who_now != SHARED:
+        bits.append(f"for {who_now}")
+    if fee_now:
+        bits.append(f"{money(fee_now)} fee")
+    busy = when_now != "Today" or bool(note_now) or bool(fee_now) or (kind != "Transfer" and who_now != SHARED)
+    with st.expander(f"More details · {', '.join(bits)}", icon=":material/tune:", expanded=busy):
+        when = _entry_date(prefix)
+        st.text_input("Note", key=_k(prefix, "note"), placeholder="Optional, e.g. Makola market")
+        if kind == "Transfer" or fee_now:
+            st.number_input(f"Fee ({CURRENCY}), optional", min_value=0.0, value=None, step=0.5, format="%.2f",
+                            placeholder="0.00", key=_k(prefix, "fee"),
+                            help=f"MoMo or bank charges. Saved as a separate {FEE_CATEGORY} expense.")
+        if kind != "Transfer":
+            who_key = _k(prefix, "who")
+            members = b.members()
+            if ss.get(who_key) and ss[who_key] not in members:
+                members = members + [ss[who_key]]
+            _ensure(who_key, members, SHARED)
+            st.selectbox("Who was it for?", members, key=who_key, accept_new_options=True,
+                         help=f"Leave as {SHARED} unless you track spending per person. Type a name to add someone.")
+    return when
+
+
+@st.dialog("Add an entry", width="small")
+def _add_dialog():
+    entry_form("q")
+
+
+def add_button(where):
+    """The one way to add money in, money out or a move. Opens the form as a pop-up."""
+    if not book().account_names:
+        return
+    if st.button("Add an entry", type="primary", icon=":material/add:", width="stretch", key=f"add_open_{where}"):
+        _add_dialog()
 
 
 # ---- savings goals ------------------------------------------------------------

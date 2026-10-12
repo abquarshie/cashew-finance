@@ -108,7 +108,7 @@ def _new_rule(b):
                                 width="stretch") or "Transfer"
     names = b.category_names(kind)
     if not names:
-        st.warning(f"There are no {kind.lower()} categories yet. Add one in **Categories & accounts**.")
+        st.warning(f"There are no {kind.lower()} categories yet. Add one in **Settings → Accounts**.")
         return
     q1, q2 = st.columns(2)
     name = q1.text_input("Name", placeholder="e.g. Monthly Susu", key="draft_r_name")
@@ -185,7 +185,7 @@ def _new_rule(b):
 
 def render():
     b = book()
-    page_header("Auto transactions", "Regular entries and moves that add themselves")
+    page_header("Repeats", "Salary, rent, Susu and other entries that add themselves on a schedule")
     left, right = st.columns([3, 2], gap="medium")
     with left:
         with card("rules"):
@@ -205,6 +205,6 @@ def render():
         with card("rule-new"):
             section("New auto transaction")
             if not b.account_names:
-                st.warning("Add an account first in **Categories & accounts**.")
+                st.warning("Add an account first in **Settings → Accounts**.")
             else:
                 _new_rule(b)

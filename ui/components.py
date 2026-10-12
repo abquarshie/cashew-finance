@@ -12,6 +12,10 @@ def esc(x):
 
 
 def page_header(title, subtitle=""):
+    if st.session_state.get("_in_tab"):  # inside a tab the page already has its title; keep only the one-line explanation
+        if subtitle:
+            st.caption(subtitle)
+        return
     sub = f'<div class="page-sub">{esc(subtitle)}</div>' if subtitle else ""
     st.html(f'<div class="page-head"><div class="page-title">{esc(title)}</div>{sub}</div>')
 

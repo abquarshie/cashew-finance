@@ -74,3 +74,26 @@ def open_panel(page: Page, label):
 def toasts(page: Page):
     t = page.locator('[data-testid="stToast"]')
     return " | ".join(t.nth(i).inner_text() for i in range(t.count()))
+
+
+def open_add(page: Page):
+    """The Add an entry button opens the form as a pop-up."""
+    page.get_by_role("button", name="Add an entry").first.click()
+    page.locator('[role="dialog"]').wait_for(state="visible", timeout=10000)
+    settle(page)
+
+
+def details(page: Page):
+    """Open "More details" in the entry form (date, note, who, fee)."""
+    d = page.locator('[role="dialog"] [data-testid="stExpander"] summary').filter(has_text="More details")
+    if d.count() and not page.locator('[role="dialog"] [data-testid="stExpanderDetails"]').filter(
+            has=page.get_by_text("When")).first.is_visible():
+        d.click()
+        settle(page, 600)
+
+
+def tab(page: Page, label):
+    """Pick one of a page's tabs (the row of buttons under the title)."""
+    page.locator('[data-testid="stMain"] [data-testid="stButtonGroup"]').first.get_by_text(label, exact=True).click()
+    settle(page, 1800)
+    no_errors(page)

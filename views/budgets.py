@@ -40,7 +40,7 @@ def render():
             section("Set a budget")
             targets = _targets(b)
             if not targets:
-                empty("Add expense categories first in Categories & accounts.")
+                empty("Add expense categories first in Settings → Accounts.")
             else:
                 key = st.selectbox("Budget for", list(targets), format_func=lambda k: targets[k], key="draft_b_key",
                                    help="Pick a whole group like Food, or a single category.")

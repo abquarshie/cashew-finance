@@ -7,8 +7,8 @@ from datetime import date, timedelta
 import pytest
 
 from conftest import MEMBER, OWNER, PHONE, q
-from helpers import (amount_box, box, chip, go, no_errors, open_app, open_menu, open_panel, settle, sign_in, toasts,
-                     type_in)
+from helpers import (amount_box, box, chip, details, go, no_errors, open_add, open_app, open_menu, settle, sign_in,
+                     tab, toasts, type_in)
 
 pytestmark = pytest.mark.browser
 
@@ -86,68 +86,67 @@ def test_owner_signs_up_and_stays_signed_in(phone, app_url, conn):
 # ---- dashboard -------------------------------------------------------------------------------
 def test_dashboard_layout(phone, app_url):
     sign_in(phone, app_url)
+    hero = phone.locator(".hero")
+    assert "Safe to spend until payday" in hero.inner_text(), "one big number at the top"
     tiles = phone.locator(".kpi-grid .kpi")
-    labels = [tiles.nth(i).locator(".kpi-label").first.inner_text() for i in range(tiles.count())]
-    assert labels == ["Account balances", "Income", "Expenses"]
-    balances = tiles.nth(0).inner_text()
-    assert "Safe to spend until payday" in balances
-    assert "MoMo" in balances and "savings" in balances, "every account listed, savings marked"
-    assert tiles.nth(0).locator(".kpi-value").count() == 0, "the total lives in More stats, not on the dashboard"
+    assert [tiles.nth(i).locator(".kpi-label").inner_text() for i in range(tiles.count())] == ["Income", "Expenses"]
 
-    assert not amount_box(phone).is_visible(), "Add an entry starts closed"
-    assert not phone.get_by_text("See all transactions").is_visible(), "Recent activity starts closed"
-    for panel in ("Budgets", "Where the money went"):
-        assert phone.locator(f'[data-testid="stExpander"] summary:has-text("{panel}")').count() == 1
-    assert not phone.locator(".prog-list").first.is_visible(), "Budgets starts closed"
-    assert not phone.locator('.st-key-draft_open_spending [data-testid="stExpanderDetails"]').is_visible(), \
-        "Where the money went starts closed"
-    phone.locator('[data-testid="stExpander"] summary:has-text("Budgets")').click()
+    balances = phone.locator('[data-testid="stExpander"]').filter(has_text="Account balances")
+    assert "in all" in balances.locator("summary").inner_text(), "the total sits on the fold"
+    assert not phone.locator(".bal-rows").is_visible(), "balances are one tap below"
+    balances.locator("summary").click()
+    settle(phone)
+    rows = phone.locator(".bal-rows").inner_text()
+    assert "MoMo" in rows and "savings" in rows, "every account listed, savings marked"
+
+    assert phone.get_by_role("button", name="Add an entry").is_visible()
+    assert not amount_box(phone).count(), "the form only appears when Add is tapped"
+    assert phone.get_by_text("See all transactions").is_visible(), "recent activity is always there"
+    budgets = phone.locator('[data-testid="stExpander"]').filter(has_text="Budgets and spending")
+    assert not phone.locator(".prog-list").first.is_visible()
+    budgets.locator("summary").click()
     settle(phone)
     assert phone.locator(".prog-list").first.is_visible()
 
     open_menu(phone)
     sidebar = phone.locator('[data-testid="stSidebar"]')
+    links = [t.strip().split("\n")[-1] for t in sidebar.locator('[data-testid="stSidebarNav"] a').all_inner_texts()]
+    assert links == ["Home", "Transactions", "Budgets & goals", "Meals", "Shopping list", "Settings"], links
     sidebar.get_by_text("More stats").click()
     settle(phone, 2000)
     side = sidebar.inner_text()
     for tile in ("In all accounts", "Net balance", "Savings rate", "Budgets at risk", "Next auto entry", "Income and expenses, 6 months"):
         assert tile in side
-    assert "Account balances" not in side, "balances moved to the dashboard"
     assert sidebar.locator('[data-testid="stVegaLiteChart"], .vega-embed').count() >= 1
 
 
 def test_quick_entry_in_four_taps(phone, app_url, conn):
     sign_in(phone, app_url)
-    open_panel(phone, "Add an entry")
+    open_add(phone)
+    dialog = phone.locator('[role="dialog"]')
     amt = amount_box(phone)
     assert amt.is_visible()
-    # the cursor lands in the amount box and phones get the number keypad (give the browser a moment)
-    phone.wait_for_function("() => { const a = document.activeElement; "
-                            "return a && a.getAttribute('aria-label') === 'Amount (GH₵)' "
-                            "&& a.getAttribute('inputmode') === 'decimal'; }", timeout=5000)
-    phone.locator('[data-testid="stExpander"] summary:has-text("Where the money went")').click()
-    settle(phone)
-    spending = phone.locator('.st-key-draft_open_spending [data-testid="stExpanderDetails"]')
-    assert spending.is_visible()
+    body = dialog.inner_text()
+    assert "More details · Today" in body, "date, note and who are folded away"
+    assert not box(phone, "Note").is_visible()
 
     type_in(amt, "38.5")
     pick_category(phone, "Staples")
     save(phone)
     kind, cat, amount, when, by, *_ = last_tx(conn)[0]
     assert (kind, cat, float(amount), when, by) == ("Expense", "Staples", 38.5, date.today(), "xan")
-    assert not amount_box(phone).is_visible(), "Add an entry folds away after saving"
-    assert not phone.get_by_text("See all transactions").is_visible()
-    assert not spending.is_visible(), "Where the money went folds away too"
+    assert not dialog.count() or not dialog.is_visible(), "the pop-up closes after saving"
     assert "Saved GH₵38.50 expense to Staples" in toasts(phone)
 
 
 def test_duplicates_are_caught(phone, app_url, conn):
     sign_in(phone, app_url)
-    open_panel(phone, "Add an entry")
+    open_add(phone)
     pick_category(phone, "Staples")
     phone.get_by_role("button", name="Same as last time: GH₵38.50").click()
     settle(phone)
     assert amount_box(phone).input_value() in ("38.50", "38.5")
+    details(phone)
     chip(phone, "Yesterday").click()
     settle(phone)
     before = count_tx(conn)
@@ -159,7 +158,8 @@ def test_duplicates_are_caught(phone, app_url, conn):
     assert count_tx(conn) == before + 1
     assert last_tx(conn)[0][3] == date.today() - timedelta(days=1)
 
-    open_panel(phone, "Add an entry")
+    open_add(phone)
+    assert "More details · Today" in phone.locator('[role="dialog"]').inner_text(), "the date goes back to today"
     pick_category(phone, "Staples")
     phone.get_by_role("button", name="Same as last time: GH₵38.50").click()
     settle(phone)
@@ -171,7 +171,7 @@ def test_duplicates_are_caught(phone, app_url, conn):
 
 def test_budget_warning_when_saving(phone, app_url):
     sign_in(phone, app_url)
-    open_panel(phone, "Add an entry")
+    open_add(phone)
     type_in(amount_box(phone), "500")
     pick_category(phone, "Medications")
     save(phone)
@@ -181,7 +181,7 @@ def test_budget_warning_when_saving(phone, app_url):
 
 def test_momo_text_fills_the_form(phone, app_url, conn):
     sign_in(phone, app_url)
-    open_panel(phone, "Add an entry")
+    open_add(phone)
     phone.get_by_text("Paste a MoMo text").click()
     settle(phone, 600)
     phone.get_by_role("textbox", name="MoMo text").fill(MTN_TEXT)
@@ -199,7 +199,7 @@ def test_momo_text_fills_the_form(phone, app_url, conn):
     assert (fee[1], float(fee[2]), fee[5]) == ("Charges", 0.5, "MoMo")
 
     before = count_tx(conn)
-    open_panel(phone, "Add an entry")
+    open_add(phone)
     phone.get_by_text("Paste a MoMo text").click()
     settle(phone, 600)
     phone.get_by_role("textbox", name="MoMo text").fill(MTN_TEXT)
@@ -214,12 +214,13 @@ def test_momo_text_fills_the_form(phone, app_url, conn):
 
 def test_transfer_with_fee(phone, app_url, conn):
     sign_in(phone, app_url)
-    open_panel(phone, "Add an entry")
+    open_add(phone)
     phone.locator(".st-key-draft_q_kind").get_by_text("Transfer").click()
     settle(phone)
     type_in(amount_box(phone), "200")
     chip(phone, "GCB").click()
     settle(phone)
+    details(phone)
     type_in(phone.locator(".st-key-draft_q_fee input"), "2")
     save(phone, "Save transfer")
     fee, move = last_tx(conn, 2)
@@ -253,7 +254,9 @@ def test_member_joins_with_invite_code(browser, app_url, conn):
     settle(page, 3500)
     no_errors(page)
     assert q(conn, "SELECT is_owner FROM users WHERE username = 'ama'") == [(False,)]
-    go(page, "People & sign-in")
+    go(page, "Settings")
+    assert "Parts" not in page.inner_text("body"), "members can't switch parts off"
+    tab(page, "People")
     body = page.inner_text("body")
     assert "Invite your family" not in body and "Change your password" in body, "members don't get owner tools"
     ctx.close()
@@ -261,7 +264,8 @@ def test_member_joins_with_invite_code(browser, app_url, conn):
 
 def test_owner_tools_and_backup_download(desktop, app_url, conn):
     sign_in(desktop, app_url)
-    go(desktop, "People & sign-in")
+    go(desktop, "Settings")
+    tab(desktop, "People")
     code = q(conn, "SELECT value FROM app_meta WHERE key = 'invite_code'")[0][0]
     body = desktop.inner_text("body")
     assert code in body and "Ama" in body
@@ -360,7 +364,10 @@ def test_auto_transaction_fills_in_missed_dates(desktop, app_url, conn):
     assert made == fees == 4, (made, fees)
 
 
-PAGES = ["", "add", "transactions", "auto", "budgets", "goals", "setup", "people"]
+PAGES = ["", "transactions", "transactions?tab_transactions=Repeats", "budgets", "budgets?tab_budgets=Goals",
+         "settings", "settings?tab_settings=People", "settings?tab_settings=Parts",
+         # old addresses still work
+         "add", "auto", "goals", "setup", "people"]
 
 
 @pytest.mark.parametrize("size,scheme", [("phone", "light"), ("phone", "dark"), ("desktop", "light")])
@@ -374,3 +381,27 @@ def test_every_page_opens(browser, app_url, size, scheme):
         no_errors(page)
         assert "Sign in" not in page.locator('[data-testid="stMain"]').inner_text()[:200]
     ctx.close()
+
+
+def test_old_addresses_open_the_right_tab(desktop, app_url):
+    sign_in(desktop, app_url, path="auto")
+    assert "Create auto transaction" in desktop.inner_text("body"), "/auto opens Money on the Repeats tab"
+    open_app(desktop, app_url, "people")
+    assert "Change your password" in desktop.inner_text("body")
+
+
+def test_switching_parts_off(desktop, app_url, conn):
+    sign_in(desktop, app_url, path="settings?tab_settings=Parts")
+    for label in ("Kitchen", "Savings goals"):
+        desktop.locator('[data-testid="stCheckbox"], [data-testid="stToggle"]').filter(has_text=label).first \
+            .locator("label").first.click()
+        settle(desktop, 2500)
+    assert q(conn, "SELECT key, value FROM app_meta WHERE key IN ('feature_kitchen', 'feature_goals') ORDER BY key") == \
+        [("feature_goals", "off"), ("feature_kitchen", "off")]
+    open_app(desktop, app_url)
+    nav = desktop.locator('[data-testid="stSidebarNav"]').inner_text()
+    assert "Meals" not in nav and "Shopping list" not in nav
+    assert not desktop.locator(".st-key-card-meal-line").count()
+    open_app(desktop, app_url, "budgets")
+    assert "Goals" not in desktop.locator('[data-testid="stMain"]').inner_text()[:300]
+    q(conn, "DELETE FROM app_meta WHERE key LIKE 'feature_%%'")  # back on for the kitchen tests

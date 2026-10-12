@@ -113,6 +113,13 @@ def main():
         sys.exit("Couldn't reach the database. Check the DATABASE_URL secret is the same one the app uses "
                  f"(not a localhost address), and that the database accepts outside connections. ({first})")
     try:
+        ensure_schema(conn)
+        with conn.cursor() as cur:
+            cur.execute("SELECT value FROM app_meta WHERE key = 'feature_reminders'")
+            row = cur.fetchone()
+        if row and row[0] == "off":
+            print("Phone reminders are switched off in Settings, so no message.")
+            return
         text = build(mode, conn)
     finally:
         conn.close()

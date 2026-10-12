@@ -81,7 +81,7 @@ def _pantry(k):
     keys = {(int(i), base_of(u)) for i, u in zip(k.ingredients["id"], k.ingredients["unit"])} | set(k.pantry)
     if not keys:
         with card("meal-pantry"):
-            empty("No ingredients yet. Add them on the Recipes page.")
+            empty("No ingredients yet. Add them under Meals → Recipes.")
         return
     rows = []
     for ing, base in sorted(keys, key=lambda x: k.names.get(x[0], "").lower()):
@@ -128,7 +128,7 @@ def _pantry(k):
                 flash("Pantry updated")
                 st.rerun()
         st.caption("Shopping adds to these amounts and cooking takes from them. Correct a number any time; "
-                   "set warning levels on the Recipes page, under Ingredients.")
+                   "set warning levels under Meals → Recipes → Ingredients.")
 
 
 def render():

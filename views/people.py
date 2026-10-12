@@ -60,8 +60,6 @@ def _owner_tools(user):
             flash("New invite code made. The old one no longer works.", ":material/key:")
             st.rerun()
 
-    _reminders()
-
     with card("backup"):
         section("Backups")
         st.write("A full copy of everything (entries, budgets, goals, accounts, people) as a zip of spreadsheets. "
@@ -129,7 +127,7 @@ def _owner_tools(user):
 
 def render():
     user = st.session_state["user"]
-    page_header("People & sign-in", "Your account, and who else can use this Cashew")
+    page_header("People", "Your account, and who else can use this Cashew")
     if user["is_owner"]:
         left, right = st.columns([1, 1], gap="medium")
         with left:
@@ -140,6 +138,12 @@ def render():
         _my_account(user)
         st.caption("To invite someone or reset a password, ask the account owner.")
 
+
+
+def reminders_tab():
+    from ui.components import page_header
+    page_header("Phone reminders", "The morning and evening messages your family gets on Telegram")
+    _reminders()
 
 
 def _as_html(text):
@@ -158,7 +162,7 @@ def _reminders():
     from notify import SendError, food_budget_left, send
 
     with card("reminders"):
-        section("Phone reminders (Telegram)")
+        section("What gets sent")
         st.write("Every morning at 6:00: today's meals, prep and shopping to do, leftovers to eat, low stock and "
                  "safe to spend. In the evening, only when something needs doing tonight.")
         k, b = kitchen(), money_book()
@@ -179,8 +183,9 @@ def _reminders():
                 "group and send one message there.\n"
                 "3. Paste the token below and tap **Find chats** to get the chat IDs.\n"
                 "4. In GitHub, open the repository's **Settings → Secrets and variables → Actions** and add "
-                "`TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` (several IDs separated by commas).\n"
-                "5. From the **Actions** tab, run **Phone reminders** once to check it arrives.")
+                "`TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` (several IDs separated by commas). Paste the values "
+                "without quotes.\n"
+                "5. From the **Actions** tab, run **Daily** once to check it arrives.")
             token = st.text_input("Bot token", type="password", key="tg_token",
                                   help="Only sent to Telegram, never saved by Cashew.")
             if st.button("Find chats", disabled=not token, key="tg_find", icon=":material/search:"):

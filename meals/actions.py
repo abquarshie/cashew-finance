@@ -184,15 +184,20 @@ def remove_from_plan(entry_id):
     _run(work)
 
 
-def copy_week(from_start, to_start):
-    """Copy one week's plan onto another week (as not-yet-cooked entries). Returns how many were copied."""
+def copy_week(from_start, to_start, not_before=None):
+    """Copy one week's plan onto another week (as not-yet-cooked entries). Returns how many were copied.
+    Meals already planned in the target week are kept: only empty day-and-meal slots are filled.
+    Days before not_before (usually today) are skipped."""
+    shift = (to_start - from_start).days
     def work(conn):
         with conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO meals.plan (day, slot, recipe_id, ingredient_id, qty, unit) "
-                "SELECT day + %s, slot, recipe_id, ingredient_id, qty, unit FROM meals.plan "
-                "WHERE day BETWEEN %s AND %s ORDER BY day, id",
-                ((to_start - from_start).days, from_start, from_start + timedelta(days=6)))
+                "SELECT p.day + %s, p.slot, p.recipe_id, p.ingredient_id, p.qty, p.unit FROM meals.plan p "
+                "WHERE p.day BETWEEN %s AND %s AND p.day + %s >= %s "
+                "AND NOT EXISTS (SELECT 1 FROM meals.plan t WHERE t.day = p.day + %s AND t.slot = p.slot) "
+                "ORDER BY p.day, p.id",
+                (shift, from_start, from_start + timedelta(days=6), shift, not_before or to_start, shift))
             return cur.rowcount
     return _run(work)
 

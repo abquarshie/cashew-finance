@@ -46,6 +46,7 @@ SMALL = {
                  "FROM goal_contributions c JOIN goals g ON g.id = c.goal_id ORDER BY c.date DESC, c.id DESC LIMIT 200"),
     "users": (["id", "username", "display_name", "is_owner", "last_login", "created_at"],
               "SELECT id, username, display_name, is_owner, last_login, created_at FROM users ORDER BY id"),
+    "features": (["key", "value"], "SELECT key, value FROM app_meta WHERE key LIKE 'feature_%'"),
 }
 SMALL_SQL = "SELECT " + ", ".join(
     f"(SELECT COALESCE(json_agg(t), '[]'::json) FROM ({sql}) t) AS {name}" for name, (_, sql) in SMALL.items())
@@ -126,6 +127,12 @@ class Book:
         self.rules = _text(_floats(rules, "amount", "fee"), "note", "to_account", "member") if len(rules) else rules
         self.goals = _floats(f["goals"], "target", "saved")
         self.contribs = _text(_floats(f["contribs"], "amount"), "note", "created_by")
+        feats = f.get("features")
+        self._features = dict(zip(feats["key"], feats["value"])) if feats is not None and len(feats) else {}
+
+    def feature(self, name):
+        """Parts of the app that can be switched off in Settings (kitchen, goals, reminders). On unless turned off."""
+        return self._features.get(f"feature_{name}", "on") != "off"
 
     # ---- categories -------------------------------------------------------
     def category_names(self, kind=None):
@@ -367,6 +374,19 @@ class Book:
         today = today or date.today()
         active = self.rules[self.rules["active"]]
         return bool(len(active) and (pd.to_datetime(active["next_date"]).dt.date <= today).any())
+
+
+FEATURES = {
+    "kitchen": ("Kitchen", "Meal plan, recipes, fridge, pantry and shopping list"),
+    "goals": ("Savings goals", "Saving towards school fees, rent, a car and so on"),
+    "reminders": ("Phone reminders", "The morning and evening Telegram messages"),
+}
+
+
+def set_feature(name, on):
+    from core.db import execute
+    execute("INSERT INTO app_meta (key, value) VALUES (%s, %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+            (f"feature_{name}", "on" if on else "off"))
 
 
 def money(x, signed=False):

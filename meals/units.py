@@ -43,6 +43,21 @@ def base_of(unit):
     return unit or "pcs"
 
 
+def units_for(unit, pack=None):
+    """The few units that make sense for one item, so nobody scrolls past 30 to find "bag".
+    Rice counted in kg offers kg, g and its bag; eggs offer pcs and the crate."""
+    base = base_of(unit)
+    if base == "g":
+        out = ["kg", "g"] if unit == "kg" else ["g", "kg"]
+    elif base == "ml":
+        out = [unit] + [u for u in VOLUME if u != unit]
+    else:
+        out = [unit or "pcs"]
+    if pack and pack[0] and pack[0] not in out:
+        out.insert(0, pack[0])
+    return out
+
+
 def to_base(qty, unit, pack=None):
     """(quantity in base unit, base unit).
 

@@ -5,32 +5,11 @@ import streamlit as st
 
 from core.data import CURRENCY, KINDS, SHARED, book, money
 from core.db import run_many
-from ui.components import (activity_items, card, confirm, empty, feed_html, flash, page_header, pill, section)
-from ui.entry import entry_form
-from ui.nav import link
+from ui.components import confirm, empty, flash, page_header, pill
 
 EDIT_COLS = ["date", "category", "amount", "type", "account", "to_account", "member", "note"]
 NO_ACCOUNT = "—"
 TX_FIELDS = ["id", "date", "type", "category", "amount", "note", "member", "account", "to_account", "created_by"]
-
-
-# ---- Add transaction page ------------------------------------------------------
-def render_add():
-    b = book()
-    page_header("Add transaction", "Record money in, money out, or a move between accounts")
-    form_col, recent_col = st.columns([3, 2], gap="medium")
-    with form_col:
-        with card("add-form"):
-            entry_form("p")
-    with recent_col:
-        with card("add-recent"):
-            section("Latest entries")
-            items = activity_items(b, limit=6)
-            if items:
-                st.html(feed_html(items, show_who=b.multi_member, names=b.name_of_user if len(b.users) > 1 else None))
-            else:
-                empty("Your latest entries will show up here.")
-        st.caption("Need a new category or account? Add it in **Categories & accounts**.")
 
 
 # ---- Transactions page ----------------------------------------------------------
@@ -86,8 +65,7 @@ def render():
     _undo_banner()
 
     if not len(b.tx):
-        empty("No transactions yet.")
-        st.page_link(link("add"), label="Add your first transaction", icon=":material/add_circle:")
+        empty("No transactions yet. Tap Add an entry to record your first one.")
         return
 
     prev_key = ss.get("tx_editor_key")
@@ -146,7 +124,8 @@ def render():
     edited = st.data_editor(
         base, key=ek, hide_index=True, width="stretch", num_rows="fixed",
         height=min(36 * (len(base) + 1) + 4, 560),
-        column_order=["delete", "date", "category", "amount", "type", "account", "to_account", "member", "note"],
+        column_order=["delete", "date", "category", "amount", "type", "account", "to_account"]
+        + (["member"] if b.multi_member else []) + ["note"],
         column_config={
             "delete": st.column_config.CheckboxColumn("Delete", width=84, help="Tick, then Save to delete"),
             "date": st.column_config.DateColumn("Date", format="DD MMM YYYY", required=True),

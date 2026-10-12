@@ -8,7 +8,7 @@ from core.data import book as money_book
 from meals import actions
 from meals.data import kitchen
 from meals.logic import shopping_list, total_needs
-from meals.units import UNITS, base_of, fmt, from_base, plural, to_base
+from meals.units import base_of, units_for, fmt, from_base, plural, to_base
 from ui.components import card, empty, esc, field_msg, flash, page_header, section
 from ui.entry import _budget_alerts
 
@@ -161,8 +161,9 @@ def render():
     today = date.today()
     page_header("Shopping list", "What the planned meals need, minus what's already in the pantry")
 
-    view = st.segmented_control("View", VIEWS, default=VIEWS[0], key="meal_shop_view",
-                                label_visibility="collapsed") or VIEWS[0]
+    views = VIEWS if len(k.history) else VIEWS[:2]  # prices appear after the first saved trip
+    view = st.segmented_control("View", views, default=views[0], key="meal_shop_view",
+                                label_visibility="collapsed") or views[0]
     if view == "Prices":
         with card("meal-prices"):
             section("What things cost")
@@ -259,17 +260,15 @@ def render():
                 pack = k.pack(ing) if ing else None
                 c1, c2 = st.columns(2)
                 qty = c1.number_input("Amount", min_value=0.0, value=None, format="%g", key="meal_extra_qty")
-                options = ([pack[0]] if pack else []) + UNITS
-                default = pack[0] if pack else (k.unit_of[ing] if ing else "pcs")
-                unit = c2.selectbox("Unit", list(dict.fromkeys(options)), index=list(dict.fromkeys(options)).index(default),
-                                    key=f"meal_extra_unit_{ing}")
+                options = units_for(k.unit_of[ing], pack) if ing else ["pcs"]
+                unit = c2.selectbox("Unit", options, key=f"meal_extra_unit_{ing}")
                 if st.button("Add to list", disabled=not (ing and qty), key="meal_extra_add", icon=":material/add:"):
                     extras.append({"ing": ing, "qty": qty, "unit": unit})
                     ss.pop("meal_extra_ing", None)
                     ss.pop("meal_extra_qty", None)
                     st.rerun()
             else:
-                empty("Add ingredients on the Recipes page first.")
+                empty("Add ingredients under Meals → Recipes first.")
 
         if len(k.trips):
             with card("meal-shop-trips"):

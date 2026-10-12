@@ -5,10 +5,10 @@ import pandas as pd
 import streamlit as st
 
 from core.data import CURRENCY, book, money
-from ui.components import (activity_items, budget_html, change_pill, empty, esc, feed_html, kpi_grid, kpi_html,
-                           page_header, pill, progress_html)
-from ui.entry import entry_form
-from meals.widget import today_panel
+from ui.components import (activity_items, budget_html, card, change_pill, empty, esc, feed_html, field_msg, kpi_grid,
+                           kpi_html, page_header, pill, progress_html, section)
+from ui.entry import add_button
+from meals.widget import today_line
 from ui.nav import drawer, link
 
 IN_COLOR = "#1FA971"
@@ -135,97 +135,77 @@ def _more_stats(b, period):
         st.altair_chart(_trend_chart(b, period, height=170), width="stretch")
 
 
-def _panel(name, label, icon):
-    """A card that folds away. Closed when the app opens and after each saved entry;
-    otherwise it stays as you left it while you move around the app."""
-    return st.expander(label, key=f"draft_open_{name}", icon=icon, on_change="rerun")
-
-
-def _balances_tile(b):
-    """Every account's balance, the total, and what's safe to spend until payday."""
-    balances = b.balances()
-    everyday = set(b.everyday_accounts)
-    rows = "".join(
-        f'<div class="bal-row"><span>{esc(n)}{"" if n in everyday else " <i>savings</i>"}</span>'
-        f'<b class="{"neg" if v < 0 else ""}">{money(v)}</b></div>'
-        for n, v in balances.items())
+def _safe_tile(b):
+    """The one big number: what can be spent until payday."""
     s2s = b.safe_to_spend()
-    safe_cls = " neg" if s2s["safe"] < 0 else ""
-    detail = (f"Everyday money {money(s2s['money'])}, minus {money(s2s['bills'])} in auto bills before payday "
-              f"and {money(s2s['budget_left'])} still to spend in budgets.")
-    per_day = f"About {money(max(s2s['per_day'], 0))} a day for {s2s['days']} day{'s' if s2s['days'] != 1 else ''}. " \
-        if s2s["safe"] > 0 else "Spending is ahead of what's coming in. "
-    unassigned = b.unassigned_count()
-    note = (f'<div class="bal-note">{unassigned} older entr{"ies have" if unassigned != 1 else "y has"} no account, '
-            "so balances may be off. Fix this in Categories &amp; accounts.</div>") if unassigned else ""
-    return (
-        '<div class="kpi featured bal">'
-        '<div class="kpi-label">Account balances</div>'
-        f'<div class="bal-rows">{rows}</div>'
-        '<div class="safe">'
-        f'<div class="safe-head"><span>Safe to spend until payday, {s2s["payday"]:%a %d %b}</span>'
-        f'<b class="{safe_cls.strip()}">{money(s2s["safe"])}</b></div>'
-        f'<div class="safe-sub">{per_day}{detail}</div></div>{note}</div>'
-    )
+    if s2s["safe"] > 0:
+        sub = f"About {money(max(s2s['per_day'], 0))} a day for {s2s['days']} day{'s' if s2s['days'] != 1 else ''}"
+    else:
+        sub = "Spending is ahead of what's coming in"
+    neg = " neg" if s2s["safe"] < 0 else ""
+    return (f'<div class="hero"><div class="hero-label">Safe to spend until payday, {s2s["payday"]:%a %d %b}</div>'
+            f'<div class="hero-value{neg}">{money(s2s["safe"])}</div><div class="hero-sub">{sub}</div></div>'), s2s
+
+
+def _balances(b, s2s):
+    """Every account, one tap below the big number."""
+    balances = b.balances()
+    total = float(balances.sum()) if len(balances) else 0.0
+    everyday = set(b.everyday_accounts)
+    with st.expander(f"Account balances · {money(total)} in all", icon=":material/account_balance_wallet:"):
+        rows = "".join(
+            f'<div class="bal-row"><span>{esc(n)}{"" if n in everyday else " <i>savings</i>"}</span>'
+            f'<b class="{"neg" if v < 0 else ""}">{money(v)}</b></div>'
+            for n, v in balances.items())
+        st.html(f'<div class="bal-rows">{rows}</div>')
+        st.caption(f"Safe to spend is your everyday money ({money(s2s['money'])}) minus {money(s2s['bills'])} in "
+                   f"repeat bills before payday and {money(s2s['budget_left'])} still to spend in budgets. "
+                   "Savings accounts aren't counted.")
+        unassigned = b.unassigned_count()
+        if unassigned:
+            field_msg(f"{unassigned} older entr{'ies have' if unassigned != 1 else 'y has'} no account, so balances "
+                      "may be off. Fix this in Settings → Accounts.", "warn")
 
 
 def render():
     b = book()
-    head, pick = st.columns([3, 1], vertical_alignment="bottom")
-    with pick:
-        period = st.selectbox("Month", b.months(), format_func=lambda p: p.strftime("%B %Y"), key="dash_month",
-                              label_visibility="collapsed")
-    with head:
-        this_month = period == pd.Period(date.today(), "M")
-        name = (st.session_state.get("user") or {}).get("name")
-        page_header(f"Hello, {name}" if name and this_month else "Dashboard",
-                    "This month so far" if this_month else f"Summary for {period.strftime('%B %Y')}")
+    ss = st.session_state
+    name = (ss.get("user") or {}).get("name")
+    page_header(f"Hello, {name}" if name else "Home")
 
+    hero, s2s = _safe_tile(b)
+    st.html(hero)
+    _balances(b, s2s)
+    add_button("home")
+    if b.feature("kitchen"):
+        today_line()
+
+    period = st.selectbox("Month", b.months(), format_func=lambda p: p.strftime("%B %Y"), key="dash_month",
+                          label_visibility="collapsed")
     inc, exp = b.month_totals(period)
     p_inc, p_exp = b.month_totals(period - 1)
     kpi_grid([
-        _balances_tile(b),
         kpi_html("Income", money(inc), change_pill(inc, p_inc)),
         kpi_html("Expenses", money(exp), change_pill(exp, p_exp, good_when_up=False)),
-    ], cls="bal-grid")
+    ], cls="two")
     _more_stats(b, period)
 
-    ss = st.session_state
-    if ss.pop("draft_q_just_saved", False):  # fold both panels away after an entry is saved
-        ss["draft_open_add"] = False
-        ss["draft_open_activity"] = False
-        ss["draft_open_budgets"] = False
-        ss["draft_open_spending"] = False
-    add_open = bool(ss.get("draft_open_add"))
-    if add_open and not ss.get("_add_was_open"):
-        ss["draft_q_focus"] = True  # just opened: put the cursor in the amount box
-    ss["_add_was_open"] = add_open
+    with card("activity"):
+        section("Recent activity")
+        items = activity_items(b, limit=5)
+        if items:
+            st.html(feed_html(items, show_who=b.multi_member, names=b.name_of_user if len(b.users) > 1 else None))
+            st.page_link(link("transactions"), label="See all transactions", icon=":material/receipt_long:")
+        else:
+            empty("Nothing recorded yet. Tap Add an entry to record your first one.")
 
-    today_panel()
-
-    left, right = st.columns([2, 3], gap="medium")
-    with left:
-        with _panel("add", "Add an entry", ":material/add_circle:"), st.container(key="card-quick-add"):
-            entry_form("q", autofocus=add_open)
-    with right:
-        with _panel("activity", "Recent activity", ":material/history:"):
-            items = activity_items(b, limit=7)
-            if items:
-                st.html(feed_html(items, show_who=b.multi_member, names=b.name_of_user if len(b.users) > 1 else None))
-                st.page_link(link("transactions"), label="See all transactions", icon=":material/receipt_long:")
-            else:
-                empty("Nothing recorded yet. Add your first entry with the form on this page.")
-
-    left, right = st.columns([3, 2], gap="medium")
     month = period.strftime("%B")
-    with left:
-        with _panel("budgets", f"Budgets · {month}", ":material/donut_small:"):
-            status = b.budget_status(period)
-            if status:
-                st.html(f'<div class="prog-list">{"".join(budget_html(s) for s in status)}</div>')
-            else:
-                empty("No monthly budgets yet.")
-                st.page_link(link("budgets"), label="Set a budget", icon=":material/donut_small:")
-    with right:
-        with _panel("spending", f"Where the money went · {month}", ":material/pie_chart:"):
-            _spending(period)
+    with st.expander(f"Budgets and spending · {month}", icon=":material/donut_small:"):
+        status = b.budget_status(period)
+        if status:
+            st.html(f'<div class="prog-list">{"".join(budget_html(s) for s in status)}</div>')
+        else:
+            empty("No monthly budgets yet.")
+            st.page_link(link("budgets"), label="Set a budget", icon=":material/donut_small:")
+        st.html('<div class="section"><span class="section-title">Where the money went</span></div>')
+        _spending(period)
