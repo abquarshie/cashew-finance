@@ -7,7 +7,7 @@ from core.data import money
 from meals import actions
 from meals.data import kitchen
 from meals.logic import fridge_flags, recipe_cost
-from meals.units import LEFTOVER_UNITS, base_of, fmt, fmt_stock, from_base, plural, to_base
+from meals.units import LEFTOVER_UNITS, base_of, fmt, frac, fmt_stock, from_base, plural, to_base
 from ui.components import card, empty, esc, field_msg, flash, page_header, pill, section
 
 FLAG = {"past": ("Past eat-by", "out"), "soon": ("Eat soon", "warn"), "low": ("Running low", "warn"),
@@ -15,7 +15,7 @@ FLAG = {"past": ("Past eat-by", "out"), "soon": ("Eat soon", "warn"), "low": ("R
 
 
 def _ate_one(batch_id, portions):
-    actions.set_portions(batch_id, portions - 1)
+    actions.set_portions(batch_id, max(portions - 1, 0))
 
 
 def _bin(batch_id, label, value_each):
@@ -43,13 +43,14 @@ def _fridge(k):
             row = st.container(horizontal=True, vertical_alignment="center", key=f"meal-fr-{b['id']}")
             unit = b["unit"]
             row.html(f'<div style="min-width:0"><div class="rule-name">{esc(b["label"])}{pill(text, tone)}</div>'
-                     f'<div class="rule-meta">{b["portions"]:g} {plural(unit, b["portions"])}, cooked '
+                     f'<div class="rule-meta">{frac(b["portions"])} {plural(unit, b["portions"])}, cooked '
                      f'{b["cooked_on"]:%a %d %b}, eat by {eat_by}</div></div>', width="stretch")
             key = f"meal_fr_n_{b['id']}_{b['portions']}"
-            row.number_input("Portions", min_value=0.0, value=b["portions"], step=1.0, format="%g", key=key,
+            row.number_input("Portions", min_value=0.0, value=b["portions"], step=0.5, format="%g", key=key,
                              label_visibility="collapsed", width=110, on_change=_set, args=(b["id"], key))
-            row.button("Ate 1", key=f"meal_fr_ate_{b['id']}", on_click=_ate_one, args=(b["id"], b["portions"]),
-                       disabled=b["portions"] < 1, help=f"One {unit} eaten")
+            row.button("Ate 1" if b["portions"] >= 1 else "Ate the rest", key=f"meal_fr_ate_{b['id']}",
+                       on_click=_ate_one, args=(b["id"], b["portions"]), disabled=b["portions"] <= 0,
+                       help=f"One {unit} eaten")
             each = recipe_cost(b["recipe_id"], k.recipes, k.items, k.prices, k.packs)[1] if b["recipe_id"] else None
             row.button("", key=f"meal_fr_bin_{b['id']}", icon=":material/delete:", type="tertiary",
                        help="Thrown away: logged as food waste", on_click=_bin, args=(b["id"], b["label"], each or None))

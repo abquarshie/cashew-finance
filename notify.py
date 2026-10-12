@@ -24,21 +24,10 @@ from meals.data import _load as load_kitchen
 
 
 def food_budget_left(book, kitchen, today):
-    import pandas as pd
-    cats = {c for c in kitchen.category_of.values() if c}
-    groups = {book.group_of.get(c) for c in cats}
-    left, found, covered = 0.0, False, set()
-    status = book.budget_status(pd.Period(today, "M"))
-    for s in status:
-        if s["is_group"] and s["name"] in groups:
-            left += max(s["limit"] - s["spent"], 0)
-            covered.add(s["name"])
-            found = True
-    for s in status:
-        if not s["is_group"] and s["name"] in cats and book.group_of.get(s["name"]) not in covered:
-            left += max(s["limit"] - s["spent"], 0)
-            found = True
-    return left if found else None
+    """What's left this month in the budgets covering the kitchen's categories, or None."""
+    from meals.logic import food_budget
+    fb = food_budget(book, {c for c in kitchen.category_of.values() if c}, today)
+    return max(fb["limit"] - fb["spent"], 0) if fb else None
 
 
 def build(mode, conn, now=None):

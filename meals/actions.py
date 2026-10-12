@@ -55,7 +55,7 @@ def _recipe(cur, recipe_id):
     name, portions, keeps = cur.fetchone()
     cur.execute("SELECT ingredient_id, qty, unit FROM meals.recipe_items WHERE recipe_id = %s", (recipe_id,))
     items = [(i, float(q), u) for i, q, u in cur.fetchall()]
-    return {"name": name, "portions": int(portions), "keeps_days": int(keeps)}, items
+    return {"name": name, "portions": float(portions), "keeps_days": int(keeps)}, items
 
 
 def _entry(cur, entry_id):
@@ -174,6 +174,18 @@ def add_to_plan(day, slot, recipe_id=None, ingredient_id=None, qty=1, unit=None)
     _run(work)
 
 
+def add_many(entries):
+    """Add several plan entries at once (dicts with day, slot, recipe_id, ingredient_id, qty, unit)."""
+    def work(conn):
+        with conn.cursor() as cur:
+            for e in entries:
+                cur.execute("INSERT INTO meals.plan (day, slot, recipe_id, ingredient_id, qty, unit) "
+                            "VALUES (%s, %s, %s, %s, %s, %s)",
+                            (e["day"], e["slot"], e["recipe_id"], e["ingredient_id"], e["qty"], e["unit"]))
+        return len(entries)
+    return _run(work)
+
+
 def remove_from_plan(entry_id):
     def work(conn):
         with conn.cursor() as cur:
@@ -184,7 +196,7 @@ def remove_from_plan(entry_id):
     _run(work)
 
 
-def copy_week(from_start, to_start, not_before=None):
+def copy_week(from_start, to_start, not_before=None, days=7):
     """Copy one week's plan onto another week (as not-yet-cooked entries). Returns how many were copied.
     Meals already planned in the target week are kept: only empty day-and-meal slots are filled.
     Days before not_before (usually today) are skipped."""
@@ -197,7 +209,7 @@ def copy_week(from_start, to_start, not_before=None):
                 "WHERE p.day BETWEEN %s AND %s AND p.day + %s >= %s "
                 "AND NOT EXISTS (SELECT 1 FROM meals.plan t WHERE t.day = p.day + %s AND t.slot = p.slot) "
                 "ORDER BY p.day, p.id",
-                (shift, from_start, from_start + timedelta(days=6), shift, not_before or to_start, shift))
+                (shift, from_start, from_start + timedelta(days=days - 1), shift, not_before or to_start, shift))
             return cur.rowcount
     return _run(work)
 
@@ -242,7 +254,7 @@ def save_recipe(recipe_id, name, portions, keeps_days, prep_note, prep_hours, me
     """Create or update a recipe and replace its ingredient lines [(ingredient_id, qty, unit)]. Returns its id."""
     def work(conn):
         with conn.cursor() as cur:
-            fields = (name.strip(), int(portions), int(keeps_days), prep_note or None, prep_hours or None, method or None)
+            fields = (name.strip(), round(float(portions), 2), int(keeps_days), prep_note or None, prep_hours or None, method or None)
             if recipe_id:
                 cur.execute("UPDATE meals.recipes SET name=%s, portions=%s, keeps_days=%s, prep_note=%s, prep_hours=%s, "
                             "method=%s WHERE id=%s", fields + (recipe_id,))

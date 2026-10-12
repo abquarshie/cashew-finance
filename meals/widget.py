@@ -1,34 +1,35 @@
-"""Today's meals on Home: one line that opens the meal plan."""
-from datetime import date, datetime, timedelta
+"""The Today card: what to cook, whether it's all in, and the one reminder that matters most.
+Shown on Home and at the top of the meal plan; the morning Telegram message is built from the same summary."""
+from datetime import datetime
 
 import streamlit as st
 
+from meals.briefing import STATUS_ICON, today_summary
 from meals.data import kitchen
-from meals.logic import SLOTS, reminders
+from ui.components import esc
 from ui.nav import link
 
+TONE = {"warn": "warn", "info": "hint", "ok": "ok", "hint": "hint"}
 
-def today_line():
-    """The next meal still to cook today, and how many reminders are waiting. Tapping it opens Meals.
-    If anything goes wrong here, the rest of Home still works."""
+
+def today_card(link_to_plan=True):
+    """On Home: the most urgent reminder and a link to the plan. On the plan itself (link_to_plan=False):
+    every reminder for today and tomorrow. If anything goes wrong here, the rest of the page still works."""
     try:
         k = kitchen()
-        today, now = date.today(), datetime.now()
-        todays = k.entries(today)
-        soon = k.entries(today, today + timedelta(days=1))
-        notes = reminders(now, soon, k.recipes, k.items, k.pantry, k.fridge, k.names, k.household, packs=k.packs)
-        to_do = [e for e in todays if e["status"] == "planned"]
-        if to_do:
-            slot = next(s for s in SLOTS if any(e["slot"] == s for e in to_do))
-            dishes = ", ".join(k.entry_name(e) for e in to_do if e["slot"] == slot)
-            label = f"{slot}: {dishes}"
-        elif todays:
-            label = "Today's meals are all done"
-        else:
-            label = "Nothing planned for today"
-        if notes:
-            label += f" · {len(notes)} reminder{'s' if len(notes) != 1 else ''}"
-        with st.container(key="card-meal-line"):
-            st.page_link(link("meals"), label=label, icon=":material/restaurant:", width="stretch")
+        s = today_summary(k, datetime.now())
+        rows = "".join(
+            f'<div class="today-row {status}"><span class="today-slot">{esc(slot)}</span>'
+            f'<span class="today-dish">{esc(name)}</span>'
+            f'<span class="today-tag">{STATUS_ICON[status]} {esc(label)}</span></div>'
+            for slot, name, status, label in s["meals"])
+        shown = [s["note"]] if link_to_plan and s["note"] else ([] if link_to_plan else s["notes"])
+        note = "".join(f'<div class="today-note {TONE[tone]}">{esc(text)}</div>' for tone, text in shown)
+        more = len(s["notes"]) - len(shown)
+        with st.container(key="card-today"):
+            st.html(f'<div class="today-head">🍲 Today · {s["day"]:%a %d %b}</div>{rows}{note}')
+            if link_to_plan:
+                label = "Open the meal plan" + (f" · {more} more reminder{'s' if more != 1 else ''}" if more > 0 else "")
+                st.page_link(link("meals"), label=label, icon=":material/calendar_view_week:")
     except Exception as exc:  # never let the kitchen break the money side
         st.caption(f"Today's meals couldn't load ({exc}).")

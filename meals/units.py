@@ -25,7 +25,7 @@ _IRREGULAR = {"loaf": "loaves", "pcs": "pcs", "olonka": "olonkas"}
 
 
 def plural(word, n=2):
-    if abs(n - 1) < 1e-9 or word in WEIGHT or word in VOLUME:
+    if 0 < float(n) <= 1 + 1e-9 or word in WEIGHT or word in VOLUME:  # 1 crate, ½ crate, 2 crates
         return word
     if word in _IRREGULAR:
         return _IRREGULAR[word]
@@ -83,6 +83,27 @@ def _num(x):
     return s if s not in ("", "-0") else "0"
 
 
+FRACTIONS = {0.25: "¼", 1 / 3: "⅓", 0.5: "½", 2 / 3: "⅔", 0.75: "¾"}
+
+
+def frac(x):
+    """Counts and portions the way people say them: 1.5 -> '1½', 0.25 -> '¼', 3 -> '3', 1.2 -> '1.2'."""
+    if x is None:
+        return ""
+    x = float(x)
+    whole = math.floor(x + 1e-9)
+    rest = x - whole
+    if rest < 0.01:
+        return f"{whole:,}"
+    for value, sign in FRACTIONS.items():
+        if abs(rest - value) < 0.01:
+            return (f"{whole:,}" if whole else "") + sign
+    return _num(x)
+
+
+QUICK = [0.25, 0.5, 1, 1.5, 2, 3]  # one-tap amounts on a phone, where typing "1/2" isn't possible
+
+
 def fmt(qty, base):
     """A stored quantity in the most natural unit: 1500 g -> '1.5 kg', 3 pcs -> '3 pcs'."""
     if qty is None:
@@ -92,8 +113,8 @@ def fmt(qty, base):
     if base == "ml":
         return f"{_num(qty / 1000)} l" if abs(qty) >= 1000 else f"{_num(qty)} ml"
     if base == "pcs":
-        return _num(qty)
-    return f"{_num(qty)} {plural(base, qty)}"
+        return frac(qty)
+    return f"{frac(qty)} {plural(base, qty)}"
 
 
 def fmt_stock(qty, base, pack=None):

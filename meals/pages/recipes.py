@@ -8,7 +8,7 @@ from meals import actions
 from meals.data import invalidate_kitchen, kitchen
 from meals.starter import load_starter
 from meals.logic import recipe_cost
-from meals.units import CONTAINERS, UNITS, base_of, fmt, from_base, plural, to_base
+from meals.units import CONTAINERS, UNITS, base_of, fmt, frac, from_base, plural, to_base
 from ui.components import card, confirm, empty, esc, field_msg, flash, page_header, pill, section
 
 NEW = 0
@@ -41,7 +41,7 @@ def _recipe_card(k, rid):
     prep = f'<div class="rule-meta">Ahead: {esc(r["prep_note"])} ({r["prep_hours"]} h before)</div>' \
         if r["prep_note"] and r["prep_hours"] else ""
     return (f'<div class="rule"><div style="min-width:0"><div class="rule-name">{esc(r["name"])}'
-            f'{pill(str(r["portions"]) + " portions", "neutral")}{pill("keeps " + str(r["keeps_days"]) + " days", "accent")}'
+            f'{pill(frac(r["portions"]) + " " + plural("portion", r["portions"]), "neutral")}{pill("keeps " + str(r["keeps_days"]) + " days", "accent")}'
             f'</div><div class="rule-meta">{esc(ings) or "No ingredients yet"}</div>{prep}</div>'
             f'<div class="rule-right"><div class="rule-next">{esc(cost_txt)}</div></div></div>')
 
@@ -61,7 +61,8 @@ def _editor(k):
     name = st.text_input("Name", value=r["name"], key=pre + "name", max_chars=80,
                          placeholder="e.g. Groundnut soup").strip()
     c1, c2 = st.columns(2)
-    portions = c1.number_input("Portions it makes", 1, 100, int(r["portions"]), key=pre + "portions")
+    portions = c1.number_input("Portions it makes", min_value=0.5, max_value=100.0, value=float(r["portions"]),
+                               step=0.5, format="%g", key=pre + "portions")
     keeps = c2.number_input("Keeps in the fridge (days)", 0, 30, int(r["keeps_days"]), key=pre + "keeps")
     p1, p2 = st.columns([2, 1])
     prep_note = p1.text_input("Prep ahead (optional)", value=r["prep_note"] or "", key=pre + "prep",

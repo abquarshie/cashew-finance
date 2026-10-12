@@ -126,6 +126,18 @@ TABLES += [
     """,
 ]
 
+TABLES += [
+    # half portions and the like: a recipe can make 2.5 portions (whole numbers before)
+    """
+    DO $$ BEGIN
+      IF (SELECT data_type FROM information_schema.columns
+          WHERE table_schema = 'meals' AND table_name = 'recipes' AND column_name = 'portions') = 'integer' THEN
+        ALTER TABLE meals.recipes ALTER COLUMN portions TYPE NUMERIC(8, 2);
+      END IF;
+    END $$
+    """,
+]
+
 # Backup and restore order (parents before children).
 BACKUP_TABLES = ["meals.ingredients", "meals.recipes", "meals.recipe_items", "meals.plan", "meals.fridge",
                  "meals.pantry", "meals.prices", "meals.trips", "meals.trip_items", "meals.waste"]

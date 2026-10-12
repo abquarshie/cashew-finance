@@ -110,8 +110,20 @@ div.st-key-card-savebar { position: sticky; bottom: 14px; z-index: 20; border-co
   background: var(--neutral-soft); margin-left: 4px; }
 .bal-row b { font-weight: 750; font-variant-numeric: tabular-nums; }
 .bal-row b.neg { color: var(--out); }
-div.st-key-card-meal-line { padding: .35rem .6rem; }
-div.st-key-card-meal-line [data-testid="stPageLink"] p { font-weight: 650; }
+/* ---- Today card: what to cook and whether it's all in ---- */
+.today-head { font-size: 1rem; font-weight: 750; letter-spacing: -.01em; margin-bottom: .35rem; }
+.today-row { display: grid; grid-template-columns: 4.6rem 1fr; column-gap: .6rem; padding: .4rem 0;
+  border-top: 1px solid var(--line); font-size: .9rem; }
+.today-slot { color: var(--muted); font-size: .76rem; font-weight: 700; padding-top: .1rem; }
+.today-dish { font-weight: 650; min-width: 0; }
+.today-tag { grid-column: 2; color: var(--muted); font-size: .78rem; font-weight: 600; }
+.today-row.short .today-tag { color: var(--warn); }
+.today-row.ready .today-tag, .today-row.leftovers .today-tag { color: var(--in); }
+.today-row.done .today-dish { color: var(--muted); text-decoration: line-through; }
+.today-note { margin-top: .5rem; padding: .55rem .7rem; border-radius: 12px; font-size: .84rem; line-height: 1.45;
+  background: var(--accent-soft); }
+.today-note.warn { background: var(--warn-soft); }
+.week-head { color: var(--muted); font-size: .8rem; font-weight: 700; margin: .2rem 0 .1rem; }
 div[class*="st-key-add_open_"] button { min-height: 3rem; font-size: 1.02rem; border-radius: 14px; }
 
 /* ---- Telegram preview ---- */

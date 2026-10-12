@@ -1,5 +1,6 @@
-"""The meal planner end to end: recipes, the weekly plan, the shopping list, the pantry and fridge,
+"""The meal planner end to end: recipes, the two-week plan, the shopping list, the pantry and fridge,
 and groceries landing in the money tracker. Runs after test_app.py on the same database."""
+import re
 from datetime import date, timedelta
 
 import pytest
@@ -40,8 +41,25 @@ def pick(page, label, text):
     settle(page)
 
 
+def show_day(page, day):
+    """Days after this week sit in a folded "Next week" / "Week after" section."""
+    monday = date.today() - timedelta(days=date.today().weekday())
+    if day - timedelta(days=day.weekday()) != monday:
+        name = "Next week" if day - timedelta(days=day.weekday()) == monday + timedelta(days=7) else "Week after"
+        page.locator('[data-testid="stExpander"] summary').filter(has_text=name).first.click()
+        settle(page, 800)
+
+
+def day_chip(day):
+    today = date.today()
+    return "Today" if day == today else ("Tomorrow" if day == today + timedelta(days=1) else f"{day:%a %d}")
+
+
 def add_to_plan(page, day, slot, recipe, portions=None):
-    chip(page, "Today" if day == date.today() else f"{day:%a %d}", within=".st-key-card-meal-add").click()
+    if (day - date.today()).days >= 7:
+        chip(page, "Days 8 to 14", within=".st-key-card-meal-add").click()
+        settle(page, 600)
+    chip(page, day_chip(day), within=".st-key-card-meal-add").click()
     settle(page, 500)
     chip(page, slot, within=".st-key-card-meal-add").click()
     settle(page, 500)
@@ -80,9 +98,6 @@ def test_plan_and_shopping_totals(desktop, app_url, conn):
     tomorrow = today + timedelta(days=1)
     sign_in(desktop, app_url, path="meals")
     add_to_plan(desktop, today, "Supper", JOLLOF)
-    if tomorrow.weekday() == 0:  # tomorrow is in next week's view
-        desktop.locator('[data-testid="stButtonGroup"]').get_by_text("Next week").click()
-        settle(desktop, 2000)
     add_to_plan(desktop, tomorrow, "Lunch", REDRED, portions=8)
     assert q(conn, "SELECT count(*) FROM meals.plan")[0][0] == 2
 
@@ -144,9 +159,7 @@ def test_shopping_trip_becomes_expenses(desktop, app_url, conn):
 
 def test_cooking_uses_the_pantry_and_fills_the_fridge(desktop, app_url, conn):
     sign_in(desktop, app_url, path="meals")
-    if (date.today() + timedelta(days=1)).weekday() == 0:
-        desktop.locator('[data-testid="stButtonGroup"]').get_by_text("Next week").click()
-        settle(desktop, 2000)
+    show_day(desktop, date.today() + timedelta(days=1))
     red = q(conn, "SELECT id FROM meals.plan WHERE recipe_id = %s", (recipe_id(conn, REDRED),))[0][0]
     desktop.locator(f".st-key-meal-entry-{red}").locator("[data-testid=stCheckbox] label").click()
     settle(desktop, 2500)
@@ -176,9 +189,7 @@ def test_leftovers_cover_a_later_meal(desktop, app_url, conn):
     q(conn, "INSERT INTO meals.plan (day, slot, recipe_id, qty) VALUES (%s, 'Supper', %s, 4)",
       (later, recipe_id(conn, REDRED)))
     sign_in(desktop, app_url, path="meals")
-    if later > date.today() - timedelta(days=date.today().weekday()) + timedelta(days=6):
-        desktop.locator('[data-testid="stButtonGroup"]').get_by_text("Next week").click()
-        settle(desktop, 2000)
+    show_day(desktop, later)
     entry = q(conn, "SELECT id FROM meals.plan WHERE day = %s AND slot = 'Supper'", (later,))[0][0]
     desktop.locator(f".st-key-meal-entry-{entry}").get_by_role("button", name="Fridge (4)").click()
     settle(desktop, 2500)
@@ -192,29 +203,40 @@ def test_dashboard_shows_todays_meals(phone, app_url, conn):
     q(conn, "INSERT INTO meals.fridge (label, portions, cooked_on, eat_by) VALUES ('Shito', 1, %s, %s)",
       (date.today() - timedelta(days=3), date.today()))
     sign_in(phone, app_url)
-    line = phone.locator(".st-key-card-meal-line").inner_text()
-    assert JOLLOF in line and "reminder" in line, line
+    card = phone.locator(".st-key-card-today").inner_text()
+    assert JOLLOF in card and "Supper" in card, card
+    assert any(tag in card for tag in ("all in", "missing", "from the fridge")), "each dish says if it's in stock"
     assert phone.locator(".kpi-grid .kpi").count() == 2, "the money side is untouched by the kitchen"
-    phone.locator(".st-key-card-meal-line a").click()
+    phone.locator(".st-key-card-today a").click()
     settle(phone, 2500)
     assert "/meals" in phone.url
-    assert "Eat the 1 portion of Shito by today" in phone.inner_text("body"), "reminders show on the plan"
+    assert "Eat the 1 portion of Shito by today" in phone.inner_text("body"), "every reminder shows on the plan"
 
 
 def test_copy_last_week(desktop, app_url, conn):
-    monday = date.today() - timedelta(days=date.today().weekday())
-    q(conn, "INSERT INTO meals.plan (day, slot, recipe_id, qty) VALUES (%s, 'Lunch', %s, 4), (%s, 'Supper', %s, 4)",
-      (monday - timedelta(days=1), recipe_id(conn, REDRED), monday - timedelta(days=1), recipe_id(conn, JOLLOF)))
+    src = date.today() - timedelta(days=4)
+    target = src + timedelta(days=7)
+    q(conn, "DELETE FROM meals.plan WHERE day = %s", (target,))
+    q(conn, "INSERT INTO meals.plan (day, slot, recipe_id, qty, status) VALUES (%s, 'Breakfast', %s, 4, 'cooked'), "
+            "(%s, 'Lunch', %s, 2.5, 'cooked')", (src, recipe_id(conn, REDRED), src, recipe_id(conn, JOLLOF)))
     sign_in(desktop, app_url, path="meals")
-    desktop.locator('[data-testid="stButtonGroup"]').get_by_text("Next week").click()
-    settle(desktop, 2000)
-    before = q(conn, "SELECT count(*) FROM meals.plan WHERE day >= %s", (monday + timedelta(days=7),))[0][0]
-    desktop.get_by_role("button", name="Copy the week before").click()
+    desktop.get_by_role("button", name=re.compile("from the week before|Copy the week before")).click()
     settle(desktop, 2500)
     no_errors(desktop)
-    after = q(conn, "SELECT count(*) FROM meals.plan WHERE day >= %s", (monday + timedelta(days=7),))[0][0]
-    assert after > before
-    assert not desktop.get_by_role("button", name="Copy the week before").count(), "nothing left to copy"
+    rows = q(conn, "SELECT slot, qty, status FROM meals.plan WHERE day = %s ORDER BY slot", (target,))
+    assert [(r[0], float(r[1]), r[2]) for r in rows] == [("Breakfast", 4.0, "planned"), ("Lunch", 2.5, "planned")], \
+        "copied as not-yet-cooked, half portions kept"
+    assert not desktop.get_by_role("button", name=re.compile("week before")).count(), "nothing left to copy"
+
+
+def test_plan_two_weeks_ahead(desktop, app_url, conn):
+    later = date.today() + timedelta(days=10)
+    sign_in(desktop, app_url, path="meals")
+    body = desktop.inner_text("body")
+    assert "This week" in body and "Next week" in body, "the next 14 days, grouped by week"
+    add_to_plan(desktop, later, "Breakfast", JOLLOF, portions=2.5)
+    rows = q(conn, "SELECT qty FROM meals.plan WHERE day = %s AND slot = 'Breakfast' ORDER BY id DESC", (later,))
+    assert rows and float(rows[0][0]) == 2.5
 
 
 def test_pantry_stocktake(desktop, app_url, conn):

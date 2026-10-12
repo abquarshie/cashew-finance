@@ -306,6 +306,8 @@ def test_sign_out_and_lockout(phone, app_url, conn):
 def test_edit_delete_and_undo_in_the_table(desktop, app_url, conn):
     sign_in(desktop, app_url, path="transactions")
     grid = desktop.locator('[data-testid="stDataFrame"]').first
+    grid.scroll_into_view_if_needed()
+    settle(desktop, 1500)  # let the page finish moving before measuring where the cells are
     gb = grid.bounding_box()
     first, second = q(conn, "SELECT id, category FROM transactions WHERE date_trunc('month', date) = "
                             "date_trunc('month', CURRENT_DATE) ORDER BY date DESC, id DESC LIMIT 2")

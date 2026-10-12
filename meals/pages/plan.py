@@ -2,30 +2,26 @@ from datetime import date, datetime, timedelta
 
 import streamlit as st
 
-from meals import actions
-from meals.data import kitchen
-import pandas as pd
-
 from core.data import book as money_book
 from core.data import money
-from meals.logic import OPEN, SLOTS, cost_of, recipe_cost, reminders, shopping_list, suggest, total_needs
-from meals.units import fmt, units_for, plural, to_base
+from meals import actions
+from meals.briefing import entry_status, guard
+from meals.data import kitchen
+from meals.logic import (OPEN, SLOTS, cost_of, recipe_cost, repeat_plan, shopping_list, shortfall, suggest,
+                          total_needs)
+from meals.units import QUICK, fmt, frac, plural, to_base, units_for
+from meals.widget import today_card
 from ui.components import card, empty, esc, field_msg, flash, page_header, pill
 from ui.nav import go
 
-WEEKS = {-1: "Last week", 0: "This week", 1: "Next week", 2: "In 2 weeks"}
+VIEWS = ["Next 2 weeks", "Past 2 weeks"]
 DONE_LABEL = {"cooked": "Cooked", "from_fridge": "From the fridge", "done": "Eaten"}
+SPANS = ["Next 7 days", "Days 8 to 14"]
 
 
 def _next_slot(now=None):
     h = (now or datetime.now()).hour
     return "Breakfast" if h < 10 else ("Lunch" if h < 15 else "Supper")
-
-
-def _week_start():
-    off = st.session_state.get("meal_week", 0) or 0
-    today = date.today()
-    return today - timedelta(days=today.weekday()) + timedelta(weeks=off)
 
 
 def _toggle(entry_id, kind, status):
@@ -64,13 +60,21 @@ def _entry_row(k, e, today):
     kind = "recipe" if e["recipe_id"] else "item"
     name = k.entry_name(e)
     if kind == "recipe":
-        detail = f"{e['qty']:g} portions"
+        detail = f"{frac(e['qty'])} {plural('portion', e['qty'])}"
     else:
-        pack = k.pack(e["ingredient_id"])
         unit = e["unit"] or "pcs"
-        detail = f"{e['qty']:g} {plural(unit, e['qty'])}" if pack and unit == pack[0] else fmt(*to_base(e["qty"], unit))
+        detail = fmt(*to_base(e["qty"], unit))  # 1.5 kg, 2½ bunches, ½ crate
     done = e["status"] != OPEN
-    label = f"{name} · {detail}" + (f" · {DONE_LABEL[e['status']]}" if done else "")
+    if done:
+        label = f"{name} · {detail} · {DONE_LABEL[e['status']]}"
+    elif e["day"] >= today:
+        status, _ = entry_status(k, e, today)
+        m = k.meal_status(e["id"], today) or {}
+        short = len(m.get("missing", []))
+        tag = {"ready": "✅", "leftovers": "🥡 fridge", "short": f"🛒 {short} to buy"}.get(status, "")
+        label = f"{name} · {detail} {tag}".rstrip()
+    else:
+        label = f"{name} · {detail}"
     row = st.container(horizontal=True, vertical_alignment="center", key=f"meal-entry-{e['id']}")
     row.checkbox(label, value=done, key=f"meal_e{e['id']}_{e['status']}", on_change=_toggle,
                  args=(e["id"], kind, e["status"]), width="stretch",
@@ -84,16 +88,27 @@ def _entry_row(k, e, today):
                args=(e["id"],), help="Remove from the plan")
 
 
+def _quick_qty():
+    q = st.session_state.get("meal_add_quick")
+    if q is not None:
+        st.session_state["meal_add_qty"] = float(q)
+    st.session_state["meal_add_quick"] = None
+
+
 @st.fragment
-def _add_form(start):
+def _add_form():
     ss = st.session_state
     k = kitchen()
-    days = [start + timedelta(days=i) for i in range(7)]
     today = date.today()
+    span = st.segmented_control("Days", SPANS, default=SPANS[0], key="meal_add_span", required=True,
+                                label_visibility="collapsed")
+    first = today + timedelta(days=0 if span == SPANS[0] else 7)
+    days = [first + timedelta(days=i) for i in range(7)]
     if ss.get("meal_add_day") not in days:
-        ss["meal_add_day"] = today if today in days else days[0]
+        ss["meal_add_day"] = days[0]
     ss.setdefault("meal_add_slot", _next_slot())
-    st.pills("Day", days, key="meal_add_day", format_func=lambda d: "Today" if d == today else f"{d:%a %d}")
+    st.pills("Day", days, key="meal_add_day", format_func=lambda d: "Today" if d == today else (
+        "Tomorrow" if d == today + timedelta(days=1) else f"{d:%a %d}"))
     st.pills("Meal", SLOTS, key="meal_add_slot")
     what = st.segmented_control("What", ["Recipe", "Fruit or other item"], default="Recipe", key="meal_add_what",
                                 label_visibility="collapsed") or "Recipe"
@@ -106,20 +121,20 @@ def _add_form(start):
             return
         rid = st.selectbox("Recipe", list(k.recipes), index=None, placeholder="Choose a dish",
                            format_func=lambda i: k.recipes[i]["name"], key="meal_add_recipe")
-        portions = st.number_input("Portions to cook", 1, 100,
-                                   int(k.recipes[rid]["portions"]) if rid else max(k.household, 1),
-                                   key=f"meal_add_portions_{rid}")
+        portions = st.number_input("Portions to cook", min_value=0.25, max_value=100.0, step=0.5, format="%g",
+                                   value=float(k.recipes[rid]["portions"]) if rid else float(max(k.household, 1)),
+                                   key=f"meal_add_portions_{rid}", help="Halves and quarters are fine: 2.5, 0.5…")
         if rid:
             batch, each, unknown = recipe_cost(rid, k.recipes, k.items, k.prices, k.packs)
             if batch:
                 field_msg(f"{'At least' if unknown else 'About'} {money(each)} a portion, "
-                          f"{money(each * portions)} for {portions}.", "hint")
+                          f"{money(each * portions)} for {frac(portions)}.", "hint")
             have = k.fridge_portions(rid)
             if have:
-                field_msg(f"There are {have:g} portions of this in the fridge already.", "hint")
+                field_msg(f"There are {frac(have)} portions of this in the fridge already.", "hint")
             left = portions - min(k.household, portions)
             if left > 0:
-                field_msg(f"{k.household} eat at the meal; {left:g} portion{'s' if left != 1 else ''} will go into "
+                field_msg(f"{k.household} eat at the meal; {frac(left)} {plural('portion', left)} will go into "
                           "the fridge.", "hint")
         ok = rid is not None
         args = dict(recipe_id=rid, qty=portions)
@@ -129,14 +144,17 @@ def _add_form(start):
             return
         ing = st.selectbox("Item", list(k.names), index=None, placeholder="e.g. Bananas",
                            format_func=lambda i: k.names[i], key="meal_add_item")
+        st.pills("Quick amount", QUICK, key="meal_add_quick", format_func=frac, on_change=_quick_qty,
+                 label_visibility="collapsed")
         c1, c2 = st.columns(2)
-        qty = c1.number_input("How much", min_value=0.0, value=None, placeholder="0", key="meal_add_qty", format="%g")
+        qty = c1.number_input("How much", min_value=0.0, value=None, step=0.25, placeholder="0", key="meal_add_qty",
+                              format="%g")
         units = units_for(k.unit_of[ing], k.pack(ing)) if ing else ["pcs"]
         unit = c2.selectbox("Unit", units, key=f"meal_add_unit_{ing}")
         ok = ing is not None and bool(qty)
         args = dict(ingredient_id=ing, qty=qty or 0, unit=unit)
 
-    when = "today" if day == today else f"{day:%a %d}"
+    when = "today" if day == today else ("tomorrow" if day == today + timedelta(days=1) else f"{day:%a %d}")
     if st.button(f"Add to {when}, {slot.lower()}", type="primary", disabled=not ok, width="stretch",
                  key="meal_add_go", icon=":material/add:"):
         actions.add_to_plan(day, slot, **args)
@@ -148,68 +166,71 @@ def _add_form(start):
 
 
 def render():
-    ss = st.session_state
     k = kitchen()
-    if ss.get("meal_week") not in WEEKS:
-        ss["meal_week"] = 0
-    start = _week_start()
-    end = start + timedelta(days=6)
-    page_header("Meal plan", f"{start:%a %d %b} to {end:%a %d %b} · {k.household} people per meal")
-    st.segmented_control("Week", list(WEEKS), key="meal_week", format_func=WEEKS.get, label_visibility="collapsed")
-    start = _week_start()
     today = date.today()
+    start, end = k.window(today)
+    page_header("Meal plan", f"Today to {end:%a %d %b} · {k.household} people per meal")
+    view = st.segmented_control("Show", VIEWS, default=VIEWS[0], key="meal_view", required=True,
+                                label_visibility="collapsed")
+    if view == VIEWS[1]:
+        st.caption("Tick anything that was cooked but never ticked off, so the pantry stays right.")
+        for i in range(1, 15):
+            _day_card(k, today - timedelta(days=i), today)
+        return
 
-    _copy_offer(k, start, today)
-    if start <= today <= start + timedelta(days=6):
-        _reminders(k, today)
-    _week_cost(k, start, today)
+    today_card(link_to_plan=False)
+    _copy_offer(k, today)
+    _cost_line(k, today)
 
     days_col, add_col = st.columns([3, 2], gap="medium")  # on a phone the days come first, the form after
     with days_col:
-        days = [start + timedelta(days=i) for i in range(7)]
-        past = [d for d in days if d < today]
-        if past:  # days already gone fold away, so today is at the top
+        monday = today - timedelta(days=today.weekday())
+        past = [monday + timedelta(days=i) for i in range(today.weekday())]
+        if past and k.entries(past[0], past[-1]):  # earlier this week folds away, so today is at the top
             n = len(k.entries(past[0], past[-1]))
             with st.expander(f"Earlier this week ({past[0]:%a} to {past[-1]:%a}, {n} meal{'s' if n != 1 else ''})",
                              icon=":material/history:"):
                 for d in past:
                     _day_card(k, d, today)
+        days = [start + timedelta(days=i) for i in range(k.HORIZON)]
+        weeks = {}
         for d in days:
-            if d >= today:
-                _day_card(k, d, today)
+            weeks.setdefault(d - timedelta(days=d.weekday()), []).append(d)
+        for i, (wk, wdays) in enumerate(weeks.items()):
+            name = "This week" if wk == monday else ("Next week" if wk == monday + timedelta(days=7) else "Week after")
+            n = len([e for e in k.entries(wdays[0], wdays[-1])])
+            head = f"{name} · {wdays[0]:%a %d} to {wdays[-1]:%a %d %b} · {n} meal{'s' if n != 1 else ''}"
+            if i == 0:
+                st.html(f'<div class="week-head">{esc(head)}</div>')
+                for d in wdays:
+                    _day_card(k, d, today)
+            else:
+                with st.expander(head, icon=":material/date_range:"):
+                    for d in wdays:
+                        _day_card(k, d, today)
     with add_col:
         with card("meal-add"):
             st.html('<div class="section-title">Add to the plan</div>')
-            _add_form(start)
+            _add_form()
         _suggestions(k, today)
 
 
-def _reminders(k, today):
-    """Soak the beans, defrost the fish, eat the leftovers: what needs doing today and tomorrow."""
-    notes = reminders(datetime.now(), k.entries(today, today + timedelta(days=1)), k.recipes, k.items, k.pantry,
-                      k.fridge, k.names, k.household, packs=k.packs)
-    for tone, text in notes:
-        field_msg(text, {"warn": "warn", "info": "hint", "ok": "ok"}[tone])
-
-
-def _copy_offer(k, start, today):
-    """Most weeks look like the last one: copy it in one tap, then change what's different."""
-    if start + timedelta(days=6) < today:
+def _copy_offer(k, today):
+    """Most weeks look like the one before: repeat it into the empty meals of the next two weeks."""
+    start, end = k.window(today)
+    new = repeat_plan(k.plan, today, k.HORIZON)
+    if not new:
         return
-    have = {(e["day"], e["slot"]) for e in k.entries(start, start + timedelta(days=6))}
-    prev = k.entries(start - timedelta(days=7), start - timedelta(days=1))
-    fits = [e for e in prev if e["day"] + timedelta(days=7) >= today
-            and (e["day"] + timedelta(days=7), e["slot"]) not in have]
-    if not fits:
-        return
-    n = len(fits)
-    label = (f"Copy the week before ({n} meal{'s' if n != 1 else ''})" if not have else
+    n = len(new)
+    first_time = not k.entries(start, end)
+    label = (f"Copy the week before ({n} meal{'s' if n != 1 else ''})" if first_time else
              f"Fill the empty meals from the week before ({n})")
     if st.button(label, icon=":material/content_copy:", key="meal_copy", width="stretch",
-                 type="primary" if not have else "secondary",
-                 help="Meals you've already planned this week stay as they are."):
-        copied = actions.copy_week(start - timedelta(days=7), start, not_before=today)
-        flash(f"Copied {copied} meal{'s' if copied != 1 else ''}. Change anything that's different this week.",
+                 type="primary" if first_time else "secondary",
+                 help="Each empty breakfast, lunch or supper in the next two weeks gets what was planned 7 days "
+                      "earlier. Meals already planned stay as they are."):
+        copied = actions.add_many(new)
+        flash(f"Copied {copied} meal{'s' if copied != 1 else ''}. Change anything that's different.",
               ":material/content_copy:")
         st.rerun()
 
@@ -217,7 +238,8 @@ def _copy_offer(k, start, today):
 def _day_card(k, d, today):
     entries = k.entries(d)
     with card(f"meal-day-{d:%Y%m%d}"):
-        tag = pill("Today", "accent") if d == today else ""
+        tag = pill("Today", "accent") if d == today else (pill("Tomorrow", "neutral")
+                                                           if d == today + timedelta(days=1) else "")
         st.html(f'<div class="section"><span class="section-title">{d:%A %d %b}</span>{tag}</div>')
         if not entries:
             empty("Nothing planned.")
@@ -231,56 +253,34 @@ def _day_card(k, d, today):
                 _entry_row(k, e, today)
 
 
-def _food_budget_left(cats, today):
-    """What's left this month in the budgets that cover the kitchen's money categories."""
-    b = money_book()
-    status = b.budget_status(pd.Period(today, "M"))
-    groups = {b.group_of.get(c) for c in cats}
-    covered, left, names = set(), 0.0, []
-    for s_ in status:
-        if s_["is_group"] and s_["name"] in groups:
-            left += max(s_["limit"] - s_["spent"], 0)
-            covered.add(s_["name"])
-            names.append(s_["name"])
-    for s_ in status:
-        if not s_["is_group"] and s_["name"] in cats and b.group_of.get(s_["name"]) not in covered:
-            left += max(s_["limit"] - s_["spent"], 0)
-            names.append(s_["name"])
-    return (left, names) if names else (None, [])
-
-
-def _week_cost(k, start, today):
-    """What the rest of the week's meals cost, what's still to buy, and how that sits against the Food budget."""
-    first = max(start, today)
-    end = start + timedelta(days=6)
-    entries = k.open_entries(first, end)
+def _cost_line(k, today):
+    """What the next two weeks' meals cost, what's still to buy, and the food budget guard."""
+    start, end = k.window(today)
+    entries = k.open_entries(start, end)
     if not entries:
         return
     needs = total_needs(entries, k.recipes, k.items, packs=k.packs)
     meals_cost, unknown = cost_of(needs, k.prices)
-    to_buy = shopping_list(needs, k.pantry, prices=k.prices, packs=k.packs)
+    to_buy = shopping_list(shortfall(k.allocation(today), entries), {}, prices=k.prices, packs=k.packs)
     buy_cost = sum(r["est"] or 0 for r in to_buy)
     buy_unknown = sum(1 for r in to_buy if r["est"] is None)
+    n = len(entries)
     if not meals_cost and not buy_cost:
         st.caption("Costs show here once you've saved a shopping trip and Cashew knows your prices.")
-        return
-    cats = {k.category_of.get(r["ingredient_id"]) for r in to_buy} | set(k.category_of.values())
-    left, names = _food_budget_left({c for c in cats if c}, today)
-    n = len(entries)
-    parts = [f"<b>{n} meal{'s' if n != 1 else ''}</b> still to cook {'this week' if start <= today else 'that week'}: "
-             f"about <b>{money(meals_cost)}</b> of ingredients"
-             + (f" (no price yet for {unknown})" if unknown else "") + "."]
-    if to_buy:
-        parts.append(f"Still to buy: about <b>{money(buy_cost)}</b>"
-                     + (f" plus {buy_unknown} item{'s' if buy_unknown != 1 else ''} with no price yet" if buy_unknown else "")
-                     + ".")
-    tone = "hint"
-    if left is not None:
-        parts.append(f"{' and '.join(names)} budget left this month: <b>{money(left)}</b>.")
-        if buy_cost > left:
-            tone = "warn"
-            parts.append("The shopping would take you over, so consider swapping a dish.")
-    st.html(f'<div class="week-cost {tone}">{" ".join(parts)}</div>')
+    else:
+        parts = [f"<b>{n} meal{'s' if n != 1 else ''}</b> still to cook in the next two weeks: "
+                 f"about <b>{money(meals_cost)}</b> of ingredients"
+                 + (f" (no price yet for {unknown})" if unknown else "") + "."]
+        if to_buy:
+            parts.append(f"After what's in the pantry and fridge, still to buy: about <b>{money(buy_cost)}</b>"
+                         + (f" plus {buy_unknown} item{'s' if buy_unknown != 1 else ''} with no price yet"
+                            if buy_unknown else "") + ".")
+        else:
+            parts.append("Everything is already in the pantry or fridge.")
+        st.html(f'<div class="week-cost hint">{" ".join(parts)}</div>')
+    g = guard(k, money_book(), today)
+    if g:
+        field_msg(g[1], g[0])
 
 
 def _add_suggestion(rid):

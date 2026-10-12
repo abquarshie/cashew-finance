@@ -8,7 +8,7 @@ from core.data import CURRENCY, book, money
 from ui.components import (activity_items, budget_html, card, change_pill, empty, esc, feed_html, field_msg, kpi_grid,
                            kpi_html, page_header, pill, progress_html, section)
 from ui.entry import add_button
-from meals.widget import today_line
+from meals.widget import today_card
 from ui.nav import drawer, link
 
 IN_COLOR = "#1FA971"
@@ -178,7 +178,7 @@ def render():
     _balances(b, s2s)
     add_button("home")
     if b.feature("kitchen"):
-        today_line()
+        today_card()
 
     period = st.selectbox("Month", b.months(), format_func=lambda p: p.strftime("%B %Y"), key="dash_month",
                           label_visibility="collapsed")

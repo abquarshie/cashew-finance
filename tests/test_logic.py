@@ -259,6 +259,81 @@ def test_cooking_reminders():
     assert "Eat the 4 portions of Red red by tomorrow" in texts
 
 
+# ---- two-week planning: sharing out the stock, fractions, jokes and the budget guard ------------
+def test_two_meals_cant_both_count_the_same_onions():
+    e = plan({"id": 1, "day": D, "slot": "Lunch", "recipe_id": 1, "qty": 4},
+             {"id": 2, "day": D + timedelta(days=1), "slot": "Supper", "recipe_id": 2, "qty": 4})
+    pantry = {(10, "pcs"): 4.0, (11, "g"): 5000.0, (12, "ml"): 1000.0}
+    alloc = ml.allocate(e, RECIPES, ITEMS, pantry, [], 4, D)
+    assert alloc["meals"][1]["status"] == "ready", "the earlier meal gets first claim"
+    assert alloc["meals"][2]["status"] == "short" and alloc["meals"][2]["missing"] == [(10, "pcs", 2.0)]
+    short = ml.shortfall(alloc, e, lambda x: RECIPES[x["recipe_id"]]["name"])
+    assert short == {(10, "pcs"): {"qty": 6.0, "short": 2.0, "for": ["Red red"]}}, "6 needed, 4 in stock: buy 2"
+    rows = ml.shopping_list(short, {})
+    assert rows[0]["to_buy"] == 2 and rows[0]["have"] == 4
+
+
+def test_leftovers_cover_a_later_meal_and_need_no_ingredients():
+    big = plan({"id": 1, "day": D, "slot": "Lunch", "recipe_id": 2, "qty": 8},
+               {"id": 2, "day": D + timedelta(days=1), "slot": "Lunch", "recipe_id": 2, "qty": 4})
+    alloc = ml.allocate(big, RECIPES, ITEMS, {}, [], 4, D)
+    assert alloc["meals"][2]["status"] == "leftovers", "8 cooked, 4 eaten, 4 kept for tomorrow"
+    assert ml.shortfall(alloc, big)[(10, "pcs")]["short"] == 6, "only the big pot needs shopping"
+    too_late = plan({"id": 3, "day": D + timedelta(days=5), "slot": "Lunch", "recipe_id": 2, "qty": 4})
+    fridge = [{"recipe_id": 2, "label": "Red red", "portions": 4, "eat_by": D + timedelta(days=1)}]
+    assert ml.allocate(too_late, RECIPES, ITEMS, {}, fridge, 4, D)["meals"][3]["status"] == "short", \
+        "leftovers past their eat-by date don't count"
+
+
+def test_half_portions_and_fractions():
+    from meals.units import frac
+    e = plan({"id": 1, "day": D, "slot": "Supper", "recipe_id": 1, "qty": 2})
+    assert ml.total_needs(e, RECIPES, ITEMS)[(10, "pcs")]["qty"] == 1.5, "half a pot, half the onions"
+    assert [frac(x) for x in (1.5, 0.25, 2 / 3, 3, 1.2)] == ["1½", "¼", "⅔", "3", "1.2"]
+    assert qfmt(1.5, "pcs") == "1½" and qfmt(0.5, "crate") == "½ crate" and qfmt(2.5, "bunch") == "2½ bunches"
+
+
+def test_shopping_amounts_you_can_actually_buy():
+    needs = {(10, "pcs"): {"qty": 5.88, "short": 5.88, "for": []}, (11, "g"): {"qty": 38.75, "short": 38.75, "for": []},
+             (12, "g"): {"qty": 1625.0, "short": 1625.0, "for": []}}
+    got = {r["ingredient_id"]: r["to_buy"] for r in ml.shopping_list(needs, {})}
+    assert got == {10: 6, 11: 40, 12: 1650}
+
+
+def test_jokes_stay_the_same_all_day_and_keep_the_facts():
+    from meals.quips import joke, with_joke
+    assert joke("missing", D) == joke("missing", D), "no change on every redraw"
+    text = with_joke("missing", "Buy before cooking: 3 onions.", D)
+    assert text.endswith("Buy before cooking: 3 onions.") and len(text) > 30
+    assert with_joke("missing", "Buy 3 onions.", D, on=False) == "Buy 3 onions."
+    from datetime import datetime
+    e = plan({"day": D + timedelta(days=1), "slot": "Breakfast", "recipe_id": 2, "qty": 4})
+    notes = ml.reminders(datetime(2026, 10, 12, 22, 0), e, RECIPES, ITEMS, {}, [], {10: "onions"}, 4, fun=True)
+    assert any("Soak the beans now" in t and not t.startswith("Soak") for _, t in notes)
+
+
+def test_repeating_last_week_fills_both_weeks_once():
+    old = plan({"day": D - timedelta(days=7), "slot": "Supper", "recipe_id": 1, "qty": 2.5},
+               {"day": D - timedelta(days=6), "slot": "Lunch", "recipe_id": 2, "qty": 4},
+               {"day": D + timedelta(days=1), "slot": "Lunch", "recipe_id": 1, "qty": 4})  # already planned
+    new = ml.repeat_plan(old, D)
+    got = {(e["day"], e["slot"]): e["qty"] for e in new}
+    assert got[(D, "Supper")] == 2.5 and got[(D + timedelta(days=7), "Supper")] == 2.5, "carries into week two"
+    assert (D + timedelta(days=1), "Lunch") not in got, "a planned meal is left alone"
+    assert got[(D + timedelta(days=8), "Lunch")] == 4, "...and repeated a week later"
+    assert ml.repeat_plan(old + plan(*new), D) == [], "nothing left to copy afterwards"
+
+
+def test_budget_guard_looks_ahead():
+    assert ml.budget_guard(1000, 500, 100) is None, "60% is fine"
+    assert ml.budget_guard(1000, 600, 200)["level"] == "75"
+    assert ml.budget_guard(1000, 800, 150)["level"] == "90"
+    g = ml.budget_guard(1000, 800, 300)
+    assert g["level"] == "will_go_over" and "GH₵100.00 over" in g["text"]
+    assert ml.budget_guard(1000, 1200, 0)["level"] == "over"
+    assert ml.budget_guard(0, 500, 100) is None, "no budget, no guard"
+
+
 # ---- containers, costs, ideas, waste and phone messages -----------------------------------------
 from meals.units import fmt_stock, packs_for  # noqa: E402
 

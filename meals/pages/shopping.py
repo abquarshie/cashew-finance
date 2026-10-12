@@ -7,22 +7,19 @@ from core.data import CURRENCY, money
 from core.data import book as money_book
 from meals import actions
 from meals.data import kitchen
-from meals.logic import shopping_list, total_needs
-from meals.units import base_of, units_for, fmt, from_base, plural, to_base
+from meals.briefing import guard
+from meals.logic import shopping_list, shortfall
+from meals.units import base_of, units_for, fmt, frac, from_base, plural, to_base
 from ui.components import card, empty, esc, field_msg, flash, page_header, section
 from ui.entry import _budget_alerts
 
-SCOPES = ["Rest of this week", "Next week", "Next 7 days"]
+SCOPES = ["Next 7 days", "Next 14 days", "Today and tomorrow"]
 VIEWS = ["Market mode", "Table", "Prices"]
 
 
 def _range(scope, today):
-    monday = today - timedelta(days=today.weekday())
-    if scope == "Next week":
-        return monday + timedelta(days=7), monday + timedelta(days=13)
-    if scope == "Next 7 days":
-        return today, today + timedelta(days=6)
-    return today, monday + timedelta(days=6)
+    days = {"Next 7 days": 7, "Next 14 days": 14, "Today and tomorrow": 2}.get(scope, 7)
+    return today, today + timedelta(days=days - 1)
 
 
 def _amount(k, r):
@@ -38,8 +35,10 @@ def _amount(k, r):
 
 def _qty_label(amount, unit):
     if unit in ("pcs",):
-        return f"{amount:g}"
-    return f"{amount:g} {plural(unit, amount)}"
+        return frac(amount)
+    if unit in ("g", "kg", "ml", "l"):
+        return f"{amount:g} {unit}"
+    return f"{frac(amount)} {plural(unit, amount)}"
 
 
 def _rows(k, items, extras, cats, fallback):
@@ -87,7 +86,7 @@ def _market(k, rows, sig):
             if got:
                 c1, c2 = st.columns(2)
                 amount = c1.number_input(f"How many ({plural(row['unit'])})" if row["unit"] != "pcs" else "How many",
-                                         min_value=0.0, value=float(row["amount"]), step=1.0, format="%g",
+                                         min_value=0.0, value=float(row["amount"]), step=0.5, format="%g",
                                          key=key + "_amt")
                 if key + "_price" not in ss and row["est"] is not None:
                     ss[key + "_price"] = round(row["est"] * (amount / row["amount"] if row["amount"] else 1), 2)
@@ -159,7 +158,7 @@ def render():
     cats = b.category_names("Expense")
     fallback = "Staples" if "Staples" in cats else (cats[0] if cats else None)
     today = date.today()
-    page_header("Shopping list", "What the planned meals need, minus what's already in the pantry")
+    page_header("Shopping list", "What the planned meals need, minus what's already in the pantry and fridge")
 
     views = VIEWS if len(k.history) else VIEWS[:2]  # prices appear after the first saved trip
     view = st.segmented_control("View", views, default=views[0], key="meal_shop_view",
@@ -173,8 +172,8 @@ def render():
                                  label_visibility="collapsed") or SCOPES[0]
     start, end = _range(scope, today)
     entries = k.open_entries(start, end)
-    needs = total_needs(entries, k.recipes, k.items, names_for_entry=lambda e: f"{k.entry_name(e)} ({e['day']:%a})",
-                        packs=k.packs)
+    # the stock is shared out across all the next two weeks' meals in order, so this list is only what's missing
+    needs = shortfall(k.allocation(today), entries, names_for_entry=lambda e: f"{k.entry_name(e)} ({e['day']:%a})")
     items = shopping_list(needs, k.pantry, k.low_levels, k.prices, k.packs)
     items.sort(key=lambda r: (r["low"], k.names.get(r["ingredient_id"], "").lower()))
     extras = ss.setdefault("meal_extra", [])
@@ -186,10 +185,13 @@ def render():
         with card("meal-shop-list"):
             planned = len(entries)
             section("To buy")
+            g = guard(k, b, today)
+            if g:
+                field_msg(g[1], g[0])
             st.caption(f"{start:%a %d} to {end:%a %d %b}: {planned} meal{'s' if planned != 1 else ''} not cooked yet")
             if not rows:
-                empty("Nothing to buy: the pantry already covers the planned meals." if entries else
-                      "No meals planned for these days yet. Plan some on the Meal plan page.")
+                empty("Nothing to buy: the pantry and fridge already cover the planned meals." if entries else
+                      "No meals planned for these days yet. Plan some under Meals.")
                 lines, missing = [], []
             elif view == "Market mode":
                 lines, missing = _market(k, rows, sig)
