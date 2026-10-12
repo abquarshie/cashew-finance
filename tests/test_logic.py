@@ -360,3 +360,40 @@ def test_notify_sends_to_every_chat():
     assert n == 2
     assert got[0][0] == "/bot123:ABC/sendMessage"
     assert [g[1]["chat_id"] for g in got] == ["111", "222"] and got[0][1]["parse_mode"] == "HTML"
+
+
+def test_notify_explains_telegram_errors():
+    """A bad chat ID gives a plain explanation, and the other chats still get the message."""
+    import json
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    import notify
+    got = []
+
+    class Fake(BaseHTTPRequestHandler):
+        def do_POST(self):
+            chat = json.loads(self.rfile.read(int(self.headers["Content-Length"])))["chat_id"]
+            if chat == "999":
+                self.send_response(400)
+                self.end_headers()
+                self.wfile.write(b'{"ok": false, "error_code": 400, "description": "Bad Request: chat not found"}')
+                return
+            got.append(chat)
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'{"ok": true}')
+
+        def log_message(self, *a):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Fake)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        with pytest.raises(notify.SendError) as err:
+            notify.send("Hi", "123:ABC", "111,999", api=f"http://127.0.0.1:{server.server_port}")
+    finally:
+        server.shutdown()
+    assert got == ["111"], "the good chat still got it"
+    msg = str(err.value)
+    assert "Sent to 1 of 2 chats" in msg and "chat not found" in msg and "minus sign" in msg

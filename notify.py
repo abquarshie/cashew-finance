@@ -9,6 +9,7 @@ Add --dry-run to print the message instead of sending it.
 import json
 import os
 import sys
+import urllib.error
 import urllib.request
 from datetime import datetime
 
@@ -50,19 +51,50 @@ def build(mode, conn, now=None):
     return morning(k, book, now, food_budget_left(book, k, now.date()))
 
 
+TELEGRAM_HINTS = {
+    401: "The bot token isn't right. Copy it again from @BotFather into the TELEGRAM_BOT_TOKEN secret.",
+    400: "Telegram doesn't know this chat. Check the ID (a group's starts with a minus sign) and that the bot "
+         "was started there: open the bot and tap Start, or send /start in the group.",
+    403: "The bot can't write to this chat: it was blocked, or removed from the group. Start it again.",
+    404: "The bot token isn't right. Copy it again from @BotFather into the TELEGRAM_BOT_TOKEN secret.",
+}
+
+
+class SendError(Exception):
+    pass
+
+
 def send(text, token, chat_ids, api=None):
+    """Send to every chat. Carries on past a chat that fails, then reports what went wrong in plain words."""
     api = (api or os.environ.get("TELEGRAM_API") or "https://api.telegram.org").rstrip("/")
-    sent = 0
-    for chat in [c.strip() for c in chat_ids.split(",") if c.strip()]:
+    sent, problems = 0, []
+    chats = [c.strip() for c in chat_ids.split(",") if c.strip()]
+    if not chats:
+        raise SendError("TELEGRAM_CHAT_ID is empty.")
+    for chat in chats:
         body = json.dumps({"chat_id": chat, "text": text, "parse_mode": "HTML",
                            "disable_web_page_preview": True}).encode()
         req = urllib.request.Request(f"{api}/bot{token}/sendMessage", data=body,
                                      headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            reply = json.loads(resp.read())
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                reply = json.loads(resp.read())
             if not reply.get("ok"):
-                raise RuntimeError(f"Telegram refused the message for chat {chat}: {reply}")
-        sent += 1
+                raise SendError(reply.get("description", "no reason given"))
+            sent += 1
+        except urllib.error.HTTPError as exc:
+            try:
+                said = json.loads(exc.read()).get("description", "")
+            except Exception:
+                said = ""
+            hint = TELEGRAM_HINTS.get(exc.code, "")
+            problems.append(f"chat {chat}: Telegram said \"{said or exc.reason}\". {hint}".strip())
+        except (urllib.error.URLError, TimeoutError) as exc:
+            problems.append(f"chat {chat}: couldn't reach Telegram ({getattr(exc, 'reason', exc)}).")
+        except SendError as exc:
+            problems.append(f"chat {chat}: Telegram said \"{exc}\".")
+    if problems:
+        raise SendError(f"Sent to {sent} of {len(chats)} chats.\n" + "\n".join(problems))
     return sent
 
 
@@ -74,7 +106,12 @@ def main():
     url = os.environ.get("DATABASE_URL")
     if not url:
         sys.exit("DATABASE_URL is not set.")
-    conn = psycopg2.connect(url, connect_timeout=20)
+    try:
+        conn = psycopg2.connect(url, connect_timeout=20)
+    except psycopg2.OperationalError as exc:
+        first = str(exc).strip().splitlines()[0] if str(exc).strip() else "no details"
+        sys.exit("Couldn't reach the database. Check the DATABASE_URL secret is the same one the app uses "
+                 f"(not a localhost address), and that the database accepts outside connections. ({first})")
     try:
         text = build(mode, conn)
     finally:
@@ -88,7 +125,10 @@ def main():
     token, chats = os.environ.get("TELEGRAM_BOT_TOKEN"), os.environ.get("TELEGRAM_CHAT_ID")
     if not token or not chats:
         sys.exit("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID need to be set as repository secrets.")
-    n = send(text, token, chats)
+    try:
+        n = send(text, token.strip(), chats)
+    except SendError as exc:
+        sys.exit(f"The {mode} message didn't go out.\n{exc}")
     print(f"Sent the {mode} message to {n} chat{'s' if n != 1 else ''}.")
 
 

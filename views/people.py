@@ -155,7 +155,7 @@ def _reminders():
     from core.data import book as money_book
     from meals.briefing import evening, morning
     from meals.data import kitchen
-    from notify import food_budget_left, send
+    from notify import SendError, food_budget_left, send
 
     with card("reminders"):
         section("Phone reminders (Telegram)")
@@ -207,5 +207,7 @@ def _reminders():
                     n = send(morning(k, b, now, food_budget_left(b, k, now.date())), token.strip(), chats)
                     flash(f"Sent to {n} chat{'s' if n != 1 else ''}. Check Telegram.", ":material/send:")
                     st.rerun()
+                except SendError as exc:
+                    st.error(str(exc))
                 except Exception as exc:
                     st.error(f"Couldn't send: {exc}")
