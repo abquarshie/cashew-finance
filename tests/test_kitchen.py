@@ -92,6 +92,23 @@ def test_starter_recipes(desktop, app_url, conn):
     assert {r[0] for r in q(conn, "SELECT DISTINCT category FROM meals.ingredients")} <= cats
 
 
+def test_saving_a_recipe_keeps_it_open(desktop, app_url, conn):
+    """Saving a recipe used to crash: the picker was changed after it had been drawn."""
+    sign_in(desktop, app_url, path="meals?tab_meals=Recipes")
+    pick(desktop, "Recipe", "Bread, eggs")
+    box = desktop.get_by_role("spinbutton", name="Portions it makes")
+    box.fill("4.5")
+    box.press("Enter")
+    settle(desktop)
+    desktop.get_by_role("button", name="Save recipe").click()
+    settle(desktop, 2500)
+    no_errors(desktop)
+    assert float(q(conn, "SELECT portions FROM meals.recipes WHERE name = 'Bread, eggs and tea'")[0][0]) == 4.5
+    assert desktop.get_by_role("spinbutton", name="Portions it makes").input_value() == "4.5", \
+        "the saved recipe stays open"
+    q(conn, "UPDATE meals.recipes SET portions = 4 WHERE name = 'Bread, eggs and tea'")
+
+
 def test_plan_and_shopping_totals(desktop, app_url, conn):
     """Jollof (3 onions) + Red red doubled to 8 portions (2 x 2 onions) = 7 onions on the list."""
     today = date.today()

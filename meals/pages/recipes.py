@@ -49,6 +49,8 @@ def _recipe_card(k, rid):
 def _editor(k):
     ss = st.session_state
     options = [NEW] + list(k.recipes)
+    if "_meal_recipe_next" in ss:  # set after saving or deleting; a widget's value can only change before it's drawn
+        ss["meal_recipe_pick"] = ss.pop("_meal_recipe_next")
     if ss.get("meal_recipe_pick") not in options:
         ss["meal_recipe_pick"] = NEW
     rid = st.selectbox("Recipe", options, key="meal_recipe_pick",
@@ -115,12 +117,12 @@ def _editor(k):
     if row.button("Save recipe", type="primary", disabled=not ready, icon=":material/check:", key=pre + "save"):
         new_id = actions.save_recipe(rid or None, name, portions, keeps, prep_note, prep_hours, method, clean)
         ss[f"meal_recipe_ver_{rid}"] = ver + 1
-        ss["meal_recipe_pick"] = new_id
+        ss["_meal_recipe_next"] = new_id
         flash(f"Saved {name}")
         st.rerun()
     if rid and row.button("Delete", icon=":material/delete:", key=pre + "del"):
         def _after():
-            st.session_state["meal_recipe_pick"] = NEW
+            st.session_state["_meal_recipe_next"] = NEW
         confirm(f"Delete **{r['name']}**? It comes off any days it's planned for that haven't been cooked yet.",
                 [("DELETE FROM meals.plan WHERE recipe_id = %s AND status = 'planned'", (rid,)),
                  ("DELETE FROM meals.recipes WHERE id = %s", (rid,))],
