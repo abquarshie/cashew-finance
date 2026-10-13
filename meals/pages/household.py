@@ -30,8 +30,8 @@ def _step(k, ing):
     return to_base(1, usual)[0], usual
 
 
-def _bump(ing, base, have, delta):
-    actions.set_stock([(ing, base, max(have + delta, 0))])
+def _bump(ing, base, delta):
+    actions.adjust_stock(ing, base, delta)  # from what's there now, so two people tapping both count
 
 
 def _budget_card(k, b):
@@ -83,8 +83,8 @@ def _items(k):
             row.html(f'<div style="min-width:0"><div class="rule-name">{esc(k.names.get(ing, "?"))}{state}</div>'
                      f'<div class="rule-meta">{esc(shelf)}</div></div>', width="stretch")
             row.button("", key=f"supply_minus_{ing}", icon=":material/remove:", disabled=have <= 0,
-                       on_click=_bump, args=(ing, base, have, -step), help=f"One {step_name} used up")
-            row.button("", key=f"supply_plus_{ing}", icon=":material/add:", on_click=_bump, args=(ing, base, have, step),
+                       on_click=_bump, args=(ing, base, -step), help=f"One {step_name} used up")
+            row.button("", key=f"supply_plus_{ing}", icon=":material/add:", on_click=_bump, args=(ing, base, step),
                        help=f"One more {step_name}")
         st.caption("Tap − when one runs out and + when you bring one home. Shopping trips add to these by "
                    "themselves; anything low goes on the shopping list.")

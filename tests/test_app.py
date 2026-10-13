@@ -413,3 +413,16 @@ def test_switching_parts_off(desktop, app_url, conn):
     open_app(desktop, app_url, "budgets")
     assert "Goals" not in desktop.locator('[data-testid="stMain"]').inner_text()[:300]
     q(conn, "DELETE FROM app_meta WHERE key LIKE 'feature_%%'")  # back on for the kitchen tests
+
+
+def test_an_ended_session_signs_the_browser_out(phone, app_url, conn):
+    """When the owner resets someone's password (or their sign-in expires), an open browser must not stay in."""
+    sign_in(phone, app_url)
+    assert f"Hello, {OWNER[1]}" in phone.inner_text("body")
+    q(conn, "DELETE FROM sessions WHERE user_id = (SELECT id FROM users WHERE username = %s)", (OWNER[0],))
+    phone.wait_for_timeout(1500)  # the app's data refreshes every second in tests (every minute normally)
+    open_menu(phone)
+    phone.locator('[data-testid="stSidebar"]').get_by_role("link", name="Transactions").click()
+    settle(phone, 2500)
+    assert "Keep me signed in" in phone.inner_text("body"), "back to the sign-in screen"
+    assert "You've been signed out" in toasts(phone)

@@ -233,13 +233,7 @@ def test_shopping_list_subtracts_the_pantry_and_adds_low_staples():
     assert rows[(14, "ml")]["reason"] == "Running low" and rows[(14, "ml")]["to_buy"] == 400
 
 
-def test_pantry_never_goes_negative():
-    new, short = ml.after_use({(10, "pcs"): 2.0}, [(10, "pcs", 3.0)])
-    assert new[(10, "pcs")] == 0 and short == [(10, "pcs", 1.0)]
-
-
 def test_leftovers_and_oldest_first():
-    assert ml.leftovers(8, 4) == 4 and ml.leftovers(3, 4) == 0
     taken, missing = ml.take_portions([{"id": 1, "portions": 2, "eat_by": D + timedelta(days=2)},
                                        {"id": 2, "portions": 3, "eat_by": D}], 4)
     assert taken == [(2, 3.0), (1, 1.0)] and missing == 0
@@ -677,3 +671,88 @@ def test_a_paired_meal_is_one_meal(conn):
         assert f"🍳 {meals} planned meal" in report, "kokonte + palm nut soup counts as one meal"
     finally:
         q(conn, "DELETE FROM meals.plan WHERE id IN %s", (tuple(r[0] for r in made),))
+
+
+# ---- audit fixes: each test is a bug that existed --------------------------------------------------------
+def test_cooking_counts_other_units(conn):
+    """Margarine is kept in grams and used by the tablespoon: cooking must take 30 g for 2 tbsp."""
+    from meals.actions import _packs
+    marg = q(conn, "SELECT id FROM meals.ingredients WHERE name LIKE 'Cook Brand%%'")[0][0]
+    with conn.cursor() as cur:
+        packs = _packs(cur)
+    needs = ml.entry_needs({"recipe_id": 1, "qty": 2}, {1: {"portions": 2}}, {1: [(marg, 2, "tbsp")]}, packs)
+    assert needs == [(marg, "g", 30.0)], "the actions know the same extra units as the screens"
+
+
+def test_the_fridge_button_never_eats_expired_food(conn):
+    from meals.actions import _eat_leftovers
+    rid = q(conn, "SELECT id FROM meals.recipes WHERE name = 'Light soup'")[0][0]
+    old, fresh = [r[0] for r in q(conn, "INSERT INTO meals.fridge (recipe_id, label, portions, cooked_on, eat_by) VALUES "
+                                        "(%s, 'old', 4, CURRENT_DATE - 5, CURRENT_DATE - 1), "
+                                        "(%s, 'fresh', 4, CURRENT_DATE, CURRENT_DATE + 3) RETURNING id", (rid, rid))]
+    e = q(conn, "INSERT INTO meals.plan (day, slot, recipe_id, qty) VALUES (CURRENT_DATE, 'Lunch', %s, 4) RETURNING id",
+          (rid,))[0][0]
+    try:
+        with conn.cursor() as cur:
+            missing = _eat_leftovers(cur, {"id": e, "recipe_id": rid, "qty": 4.0}, 4)
+        left = dict(q(conn, "SELECT id, portions FROM meals.fridge WHERE id IN (%s, %s)", (old, fresh)))
+        assert missing == 0 and float(left[old]) == 4 and float(left[fresh]) == 0, left
+    finally:
+        q(conn, "DELETE FROM meals.plan WHERE id = %s", (e,))
+        q(conn, "DELETE FROM meals.fridge WHERE id IN (%s, %s)", (old, fresh))
+
+
+def test_two_people_adding_stock_both_count(conn):
+    """The + button adds to what's there now, not to what a (possibly old) screen showed."""
+    from meals.actions import _add_stock
+    ing = q(conn, "SELECT id FROM meals.ingredients WHERE name = 'Snails'")[0][0]
+    with conn.cursor() as cur:
+        _add_stock(cur, ing, "pcs", 6)
+        _add_stock(cur, ing, "pcs", 6)
+        _add_stock(cur, ing, "pcs", -20)
+    assert q(conn, "SELECT qty FROM meals.pantry WHERE ingredient_id = %s", (ing,)) == [(0,)], "never below zero"
+    q(conn, "DELETE FROM meals.pantry WHERE ingredient_id = %s", (ing,))
+
+
+def test_deleting_a_recipe_keeps_what_was_cooked(conn):
+    from meals.actions import recipe_delete_statements
+    rid = q(conn, "INSERT INTO meals.recipes (name, role) VALUES ('Test pepper soup', 'soup') RETURNING id")[0][0]
+    starch = q(conn, "SELECT id FROM meals.recipes WHERE name = 'Banku'")[0][0]
+    pid = q(conn, "INSERT INTO meals.pairings (name) VALUES ('Banku + Test pepper soup') RETURNING id")[0][0]
+    q(conn, "INSERT INTO meals.pairing_items (pairing_id, recipe_id) VALUES (%s, %s), (%s, %s)", (pid, starch, pid, rid))
+    cooked, planned = [r[0] for r in q(conn, "INSERT INTO meals.plan (day, slot, recipe_id, qty, status) VALUES "
+                                             "(CURRENT_DATE - 2, 'Supper', %s, 4, 'cooked'), "
+                                             "(CURRENT_DATE + 2, 'Supper', %s, 4, 'planned') RETURNING id", (rid, rid))]
+    try:
+        for sql, params in recipe_delete_statements(rid, "Test pepper soup"):
+            q(conn, sql, params)
+        assert q(conn, "SELECT label, status FROM meals.plan WHERE id = %s", (cooked,)) == [("Test pepper soup", "cooked")]
+        assert not q(conn, "SELECT 1 FROM meals.plan WHERE id = %s", (planned,)), "not-yet-cooked meals go"
+        assert not q(conn, "SELECT 1 FROM meals.pairings WHERE id = %s", (pid,)), "a pairing of one dish goes"
+    finally:
+        q(conn, "DELETE FROM meals.plan WHERE id IN (%s, %s)", (cooked, planned))
+
+
+def test_a_finished_rule_carries_on_from_today():
+    from auto_rules import catch_up, occurrence
+    start, today = date(2026, 1, 5), date(2026, 10, 13)
+    n = catch_up(start, "Monthly", 3, today)       # finished after 3 runs (Jan-Mar), extended in October
+    assert occurrence(start, "Monthly", n) == date(2026, 11, 5), "the next run is the next date, not April"
+    assert catch_up(start, "Monthly", n, today) == n, "already caught up"
+
+
+def test_loaded_data_is_in_order_whatever_the_database_returns(conn):
+    """'Same as last time' and the newest-first list rely on the order, so it doesn't depend on json_agg."""
+    import json
+
+    from core.data import ORDER, SMALL, _as_dates
+    rows = [{"id": 1, "date": "2026-10-01"}, {"id": 3, "date": "2026-10-02"}, {"id": 2, "date": "2026-10-02"}]
+    df = _as_dates(pd.DataFrame(json.loads(json.dumps(rows))), [])
+    by, asc = ORDER["tx"]
+    assert df.sort_values(by, ascending=asc)["id"].tolist() == [3, 2, 1]
+    b = Book(_load_frames(conn))
+    assert b.tx["id"].tolist() == b.tx.sort_values(["date", "id"], ascending=False)["id"].tolist()
+    assert "sessions" in SMALL and isinstance(b.live_tokens, set)
+
+
+import pandas as pd  # noqa: E402

@@ -3,7 +3,7 @@ from datetime import date
 import pandas as pd
 import streamlit as st
 
-from auto_rules import occurrence
+from auto_rules import catch_up, occurrence
 from core.data import CURRENCY, FEE_CATEGORY, FREQUENCIES, KINDS, SHARED, book, money
 from core.db import execute
 from ui.components import card, confirm, empty, esc, field_msg, flash, page_header, pill, section
@@ -69,12 +69,18 @@ def _manage(b):
     if row.button("Save changes", type="primary", disabled=not changed or end_bad, key=f"rule_save_{pick}",
                   icon=":material/check:"):
         active = bool(rule["active"])
-        if new_end is not None and rule["next_date"] > new_end:
+        n, nxt = int(rule["run_count"]), rule["next_date"]
+        if status == "Finished" and (new_end is None or new_end >= date.today()):
+            # running again after it finished: carry on from today, not with every date it missed meanwhile
+            n = catch_up(rule["start_date"], rule["frequency"], n)
+            nxt = occurrence(rule["start_date"], rule["frequency"], n)
+            active = new_end is None or nxt <= new_end
+        elif status == "Finished" and nxt <= new_end:
+            active = True  # the end was moved to a date already past: fill in the runs up to it, as recorded
+        elif new_end is not None and nxt > new_end:
             active = False
-        elif status == "Finished" and (new_end is None or rule["next_date"] <= new_end):
-            active = True
-        execute("UPDATE recurring_rules SET amount=%s, fee=%s, end_date=%s, active=%s WHERE id=%s",
-                (new_amount, new_fee if new_fee else None, new_end, active, int(pick)))
+        execute("UPDATE recurring_rules SET amount=%s, fee=%s, end_date=%s, active=%s, run_count=%s, next_date=%s "
+                "WHERE id=%s", (new_amount, new_fee if new_fee else None, new_end, active, n, nxt, int(pick)))
         flash("Saved. Changes apply to future runs.")
         st.rerun()
     if status == "Active":
@@ -85,11 +91,9 @@ def _manage(b):
     elif status == "Paused":
         if row.button("Resume", icon=":material/play_arrow:", key=f"rule_resume_{pick}",
                       help="Skips the dates it was paused for, instead of adding them all at once."):
-            n, start, today = int(rule["run_count"]), rule["start_date"], date.today()
-            while occurrence(start, rule["frequency"], n) < today and n < 5000:
-                n += 1
+            n = catch_up(rule["start_date"], rule["frequency"], int(rule["run_count"]))
             execute("UPDATE recurring_rules SET active=TRUE, run_count=%s, next_date=%s WHERE id=%s",
-                    (n, occurrence(start, rule["frequency"], n), int(pick)))
+                    (n, occurrence(rule["start_date"], rule["frequency"], n), int(pick)))
             flash(f"Resumed '{rule['name']}'", ":material/play_arrow:")
             st.rerun()
     if row.button("Delete", icon=":material/delete:", key=f"rule_del_{pick}"):

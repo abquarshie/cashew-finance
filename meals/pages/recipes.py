@@ -5,7 +5,8 @@ from core.data import book as money_book
 from core.data import money
 from core.db import transact
 from meals import actions
-from meals.data import invalidate_kitchen, kitchen
+from core.db import invalidate
+from meals.data import kitchen
 from meals.catalog import SECTIONS
 from meals.logic import ROLES, recipe_cost
 from meals.starter import RECIPES as STARTER_RECIPES
@@ -91,10 +92,9 @@ def _bought_editor(k, rid, r, pre, ver):
     if rid and row.button("Delete", icon=":material/delete:", key=pre + "bdel"):
         def _after():
             st.session_state["_meal_recipe_next"] = NEW
-            invalidate_kitchen()
-        confirm(f"Delete **{r['name']}**? It comes off any days it's planned for that haven't been bought yet.",
-                [("DELETE FROM meals.plan WHERE recipe_id = %s AND status = 'planned'", (rid,)),
-                 ("DELETE FROM meals.recipes WHERE id = %s", (rid,))], f"Deleted {r['name']}", after=_after)
+        confirm(f"Delete **{r['name']}**? It comes off any days it's planned for that haven't been bought yet; "
+                "days it was already bought stay in the history.",
+                actions.recipe_delete_statements(rid, r["name"]), f"Deleted {r['name']}", after=_after)
 
 
 def _editor(k):
@@ -184,10 +184,9 @@ def _editor(k):
     if rid and row.button("Delete", icon=":material/delete:", key=pre + "del"):
         def _after():
             st.session_state["_meal_recipe_next"] = NEW
-        confirm(f"Delete **{r['name']}**? It comes off any days it's planned for that haven't been cooked yet.",
-                [("DELETE FROM meals.plan WHERE recipe_id = %s AND status = 'planned'", (rid,)),
-                 ("DELETE FROM meals.recipes WHERE id = %s", (rid,))],
-                f"Deleted {r['name']}", after=lambda: (_after(), invalidate_kitchen()))
+        confirm(f"Delete **{r['name']}**? It comes off any days it's planned for that haven't been cooked yet; "
+                "meals already cooked stay in the history.",
+                actions.recipe_delete_statements(rid, r["name"]), f"Deleted {r['name']}", after=_after)
     if not ready and not problems:
         field_msg("Add a name and at least one ingredient to save.", "hint")
 
@@ -295,6 +294,18 @@ def _ingredients(k):
             no_size = [r["Name"] for _, r in edited.iterrows()
                        if isinstance(r["Bought in"], str) and r["Bought in"] and (r["Holds"] is None or pd.isna(r["Holds"])
                                                                                    or r["Holds"] <= 0)]
+            for i in changed:  # cups and grams don't convert: say what a unit change leaves behind
+                before, after = table.loc[i, "Unit"], edited.loc[i, "Unit"]
+                if base_of(before) != base_of(after):
+                    stock = k.pantry.get((int(i), base_of(before)), 0)
+                    in_recipes = sum(1 for lines in k.items.values() for ing, _, _ in lines if ing == int(i))
+                    if stock or in_recipes:
+                        field_msg(f"{table.loc[i, 'Name']}: {before} and {after} don't convert, so "
+                                  + ", ".join(x for x in (f"its {fmt(stock, base_of(before), before)} in the pantry"
+                                                          if stock else "",
+                                                          f"{in_recipes} recipe line{'s' if in_recipes != 1 else ''}"
+                                                          if in_recipes else "") if x)
+                                  + f" will still be in {before}. Update them after saving.", "warn")
             if len(set(names)) != len(names) or "" in names:
                 field_msg("Each ingredient needs its own name.")
             elif no_size:
@@ -322,7 +333,7 @@ def _ingredients(k):
                 if st.button("Remove", key="meal_ing_del_go", icon=":material/delete:"):
                     confirm(f"Remove **{k.names[pick]}**? Its pantry stock and prices go too.",
                             [("DELETE FROM meals.ingredients WHERE id = %s", (pick,))], f"Removed {k.names[pick]}",
-                            button="Remove", after=invalidate_kitchen)
+                            button="Remove")
 
 
 def _pairing_text(k, p):
@@ -395,7 +406,7 @@ def _pairings(k):
                 if st.button("Remove", key="meal_pair_del_go", icon=":material/delete:"):
                     confirm(f"Remove **{k.pairings[pick]['name']}**? Its dishes stay in the recipe book.",
                             [("DELETE FROM meals.pairings WHERE id = %s", (pick,))], f"Removed {k.pairings[pick]['name']}",
-                            button="Remove", after=invalidate_kitchen)
+                            button="Remove")
         with card("meal-catalog"):
             section("Ghanaian kitchen catalog")
             st.caption("Everyday ingredients with their purchase units, six soup and stew templates for a week, "
@@ -421,7 +432,7 @@ def render():
                          "chicken, and bread with eggs) with their ingredients. Change anything to suit how you cook.")
                 if st.button("Add starter recipes", type="primary", icon=":material/menu_book:", key="meal_starter"):
                     n = transact(lambda conn: load_starter(conn, _expense_categories()))
-                    invalidate_kitchen()
+                    invalidate()
                     flash(f"Added {n} recipes", ":material/menu_book:")
                     st.rerun()
         left, right = st.columns([3, 2], gap="medium")

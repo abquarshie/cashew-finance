@@ -11,7 +11,7 @@ import streamlit as st
 
 from core.db import transact
 from meals.logic import OPEN, ROLE_ORDER, allocate, reminders
-from meals.units import base_of
+from meals.units import base_of, make_pack
 
 TTL = int(os.environ.get("CASHEW_CACHE_SECONDS", "60"))  # tests shorten this
 HOUSEHOLD_KEY = "meals_household"
@@ -49,8 +49,8 @@ QUERIES = {
               "GROUP BY t.id ORDER BY t.date DESC, t.id DESC LIMIT 20"),
     "settings": (["key", "value"], "SELECT key, value FROM app_meta WHERE key LIKE 'meals_%' OR key = 'feature_fun'"),
     # what each item cost per base unit on every trip in the last year, and where (for price trends)
-    "history": (["ingredient_id", "unit", "qty", "price", "date", "shop"],
-                "SELECT i.ingredient_id, i.unit, i.qty, i.price, t.date, t.shop FROM meals.trip_items i "
+    "history": (["ingredient_id", "unit", "qty", "price", "date", "shop", "trip_id"],
+                "SELECT i.ingredient_id, i.unit, i.qty, i.price, t.date, t.shop, t.id AS trip_id FROM meals.trip_items i "
                 "JOIN meals.trips t ON t.id = i.trip_id WHERE t.date >= CURRENT_DATE - 400 AND i.qty > 0 "
                 "AND i.ingredient_id IS NOT NULL ORDER BY t.date, t.id, i.id"),
     # what was paid for bought food (kenkey, waakye…) on each day, for price trends
@@ -61,7 +61,10 @@ QUERIES = {
               "SELECT id, date, label, amount, unit, value, recipe_id FROM meals.waste "
               "WHERE date >= CURRENT_DATE - 400 ORDER BY date DESC, id DESC"),
 }
-# json_agg keeps each query's ORDER BY because it aggregates the ordered subquery as it comes
+# Postgres doesn't promise to keep a subquery's ORDER BY inside json_agg, so the order that matters is set
+# again after loading: (columns, ascending)
+ORDER = {"trips": (["date", "id"], False), "history": (["date", "trip_id"], True), "bought": (["date"], True),
+         "waste": (["date", "id"], False)}
 SQL = "SELECT " + ", ".join(
     f"(SELECT COALESCE(json_agg(t), '[]'::json) FROM ({sql}) t) AS {name}" for name, (_, sql) in QUERIES.items())
 DATES = {"plan": ["day"], "fridge": ["cooked_on", "eat_by"], "trips": ["date"], "history": ["date"],
@@ -77,6 +80,9 @@ def _load(conn):
         df = pd.DataFrame(records or [], columns=cols)
         for c in DATES.get(name, []):
             df[c] = [date.fromisoformat(str(x)[:10]) if x else None for x in df[c]]
+        if ORDER.get(name) and len(df):
+            by, asc = ORDER[name]
+            df = df.sort_values(by, ascending=asc, kind="stable").reset_index(drop=True)
         out[name] = df
     return out
 
@@ -115,11 +121,12 @@ class Kitchen:
         self.food_categories = {c for i, c in self.category_of.items() if int(i) not in self.supplies}
         self.supply_categories = {c for i, c in self.category_of.items() if int(i) in self.supplies}
         # containers: {ingredient_id: (name, size in base unit, base unit, sold loose, {other unit: base units})}
-        self.packs = {int(i): (pn, float(ps), base_of(u), bool(lo), au if isinstance(au, dict) else {})
-                      for i, u, pn, ps, lo, au in
-                      zip(ing["id"], ing["unit"], ing["pack_name"], ing["pack_size"], ing["loose"], ing["alt_units"])
-                      if pn and ps is not None and not pd.isna(ps) and float(ps) > 0}
-        self.section_of = {int(i): s for i, s in zip(ing["id"], ing["section"]) if isinstance(s, str) and s}
+        self.packs = {}
+        for i, u, pn, ps, lo, au in zip(ing["id"], ing["unit"], ing["pack_name"], ing["pack_size"], ing["loose"],
+                                        ing["alt_units"]):
+            pack = make_pack(u, pn, ps, lo, au)
+            if pack:
+                self.packs[int(i)] = pack
         self.recipes = {int(r["id"]): {"name": r["name"], "portions": float(r["portions"]), "keeps_days": int(r["keeps_days"]),
                                        "prep_note": r["prep_note"], "prep_hours": None if pd.isna(r["prep_hours"])
                                        else int(r["prep_hours"]), "method": r["method"],
@@ -148,7 +155,7 @@ class Kitchen:
             elif r["ingredient_id"] is not None and not pd.isna(r["ingredient_id"]) and int(r["ingredient_id"]) in self.names:
                 p["parts"].append({"ingredient_id": int(r["ingredient_id"]), "qty": _f(r["qty"]) or 1.0,
                                    "unit": r["unit"] or self.unit_of.get(int(r["ingredient_id"]), "pcs")})
-        self.pairings = {i: p for i, p in self.pairings.items() if p["parts"]}
+        self.pairings = {i: p for i, p in self.pairings.items() if len(p["parts"]) >= 2}  # a pairing pairs things
         self.plan = [
             {"id": int(r["id"]), "day": r["day"], "slot": r["slot"],
              "recipe_id": None if pd.isna(r["recipe_id"]) else int(r["recipe_id"]),
@@ -254,14 +261,6 @@ class Kitchen:
         """Every entry sharing this entry's day and meal."""
         return [x for x in self._by_day.get(e["day"], []) if x["slot"] == e["slot"]]
 
-    @staticmethod
-    def group_meals(entries):
-        """Entries grouped into meals (lists of entries), in the order they come."""
-        groups = {}
-        for e in entries:
-            groups.setdefault((e["day"], e["slot"]), []).append(e)
-        return list(groups.values())
-
     def meal_count(self, entries):
         return len({(e["day"], e["slot"]) for e in entries})
 
@@ -285,11 +284,6 @@ class Kitchen:
 
     def open_entries(self, start, end):
         return [e for e in self.entries(start, end) if e["status"] == OPEN]
-
-    @staticmethod
-    def week_of(day):
-        start = day - timedelta(days=day.weekday())
-        return start, start + timedelta(days=6)
 
     def is_bought(self, e):
         """Food bought ready-made: a bought dish from the recipe book, or a one-off typed into the plan."""

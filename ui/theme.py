@@ -40,11 +40,6 @@ header[data-testid="stHeader"] { background: transparent; }
 section[data-testid="stSidebar"] { border-right: 1px solid var(--line); }
 [data-testid="stSidebarNavSeparator"] { display: none; }
 
-.brand { display: flex; align-items: center; gap: .6rem; margin: .1rem 0 .2rem; }
-.brand-mark { width: 30px; height: 30px; border-radius: 9px; background: var(--accent);
-  display: grid; place-items: center; color: #fff; font-weight: 800; font-size: 1rem; }
-.brand-name { font-size: 1.15rem; font-weight: 800; letter-spacing: -.02em; }
-.brand-sub { color: var(--muted); font-size: .8rem; }
 
 /* ---- type ---- */
 .page-head { margin: 0 0 1.4rem; }
@@ -75,21 +70,7 @@ div.st-key-card-savebar { position: sticky; bottom: 14px; z-index: 20; border-co
 .kpi-value { font-size: 1.5rem; font-weight: 800; letter-spacing: -.02em; margin: .2rem 0 .35rem;
   font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .kpi-sub { font-size: .76rem; color: var(--muted); font-weight: 600; line-height: 1.35; }
-.kpi.featured { grid-column: span 2; background: var(--feature); border-color: var(--feature); position: relative; overflow: hidden; }
-.kpi.featured::after { content: ""; position: absolute; right: -40px; top: -60px; width: 190px; height: 190px;
-  border-radius: 50%; border: 26px solid rgba(255,255,255,.05); }
-.kpi.featured .kpi-label, .kpi.featured .kpi-sub { color: var(--feature-muted); }
-.kpi.featured .kpi-value { color: var(--feature-text); font-size: 2rem; }
-.kpi.featured .pill.in { background: rgba(126,224,181,.16); color: var(--feature-in); }
-.kpi.featured .pill.out { background: rgba(255,180,168,.16); color: var(--feature-out); }
-.kpi.featured .pill.neutral { background: rgba(255,255,255,.1); color: var(--feature-muted); }
 
-.kpi-grid.three { grid-template-columns: 1.35fr 1fr 1fr; }
-.kpi-grid.three .kpi.featured { grid-column: span 1; }
-/* net balance with "in all accounts" under it; income and expenses beside them */
-.kpi-grid.four { grid-template-columns: 1.3fr 1fr; grid-template-rows: auto auto; grid-auto-flow: column; }
-.kpi-grid.four .kpi.featured { grid-column: auto; }
-.kpi-grid.four .kpi-sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* ---- Home: safe to spend is the one big number ---- */
 .hero { background: var(--feature); border-radius: 20px; padding: 1.15rem 1.3rem 1.2rem; position: relative; overflow: hidden;
@@ -157,12 +138,6 @@ div.st-key-mini-trend { border: 1px solid var(--line); border-radius: 14px; padd
 .mini-label { color: var(--muted); font-size: .76rem; font-weight: 650; }
 .mini-value { font-size: 1.15rem; font-weight: 800; letter-spacing: -.01em; font-variant-numeric: tabular-nums; margin-top: 1px; }
 .mini-sub { color: var(--muted); font-size: .74rem; font-weight: 600; margin-top: 1px; }
-.mini-row { display: flex; justify-content: space-between; gap: .5rem; font-size: .8rem; padding: .28rem 0;
-  border-top: 1px solid var(--line); margin-top: .3rem; }
-.mini-row:first-of-type { margin-top: .45rem; }
-.mini-row span { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.mini-row b { font-variant-numeric: tabular-nums; font-weight: 700; }
-.mini-row b.neg { color: var(--out); }
 .mini-people { display: grid; gap: .7rem; margin-top: .5rem; }
 .mini-people .prog-foot { display: none; }
 
@@ -213,12 +188,6 @@ div.st-key-draft_q_amount [data-testid="stNumberInputContainer"] { min-height: 3
 .prog-foot { display: flex; justify-content: space-between; gap: .5rem; font-size: .77rem; margin-top: .35rem; color: var(--muted); }
 .prog-foot .over { color: var(--out); font-weight: 700; }
 
-/* ---- accounts ---- */
-.acct-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px; }
-.acct { border: 1px solid var(--line); border-radius: 14px; padding: .75rem .9rem; min-width: 0; }
-.acct-name { color: var(--muted); font-size: .78rem; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.acct-bal { font-size: 1.1rem; font-weight: 800; letter-spacing: -.01em; font-variant-numeric: tabular-nums; margin-top: 2px; }
-.acct-bal.neg { color: var(--out); }
 
 /* ---- rule cards ---- */
 .rule { display: flex; justify-content: space-between; align-items: center; gap: .8rem; padding: .8rem 0; border-bottom: 1px solid var(--line); }
@@ -255,29 +224,20 @@ div.st-key-card-auth { max-width: 440px; margin: 4vh auto 0; }
 
 /* ---- buttons ---- */
 .stButton > button, .stDownloadButton > button, .stFormSubmitButton > button { font-weight: 700; }
-div.st-key-quick-actions .stButton > button { border-radius: 999px; padding: .35rem 1rem; min-height: 2.4rem; }
 
 /* ---- phone ---- */
 @media (max-width: 640px) {
   [data-testid="stMainBlockContainer"], .block-container { padding: 3.2rem .85rem 5rem; }
   .page-head { margin-bottom: 1rem; }
   .page-title { font-size: 1.5rem; }
-  .kpi-grid, .kpi-grid.three, .kpi-grid.four { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
+  .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
   .hero-value { font-size: 2.2rem; }
   .bal-rows { grid-template-columns: 1fr; }
-  .kpi-grid.four { grid-template-rows: none; grid-auto-flow: row; }
-  .kpi-grid.three .kpi.featured, .kpi-grid.four .kpi.featured, .kpi-grid.four .kpi:nth-child(2) { grid-column: span 2; }
-  .kpi-grid.four .kpi:nth-child(2) .kpi-value { font-size: 1.35rem; }
   .kpi { padding: .8rem .85rem; border-radius: 14px; }
   .kpi-value { font-size: 1.12rem; }
-  .kpi.featured .kpi-value { font-size: 1.7rem; }
   div[class*="st-key-card-"] { padding: .95rem .95rem 1rem; border-radius: 16px; }
   .prog-list { grid-template-columns: 1fr; }
-  div.st-key-quick-actions { display: grid !important; grid-template-columns: 1fr 1fr; gap: 8px !important; }
-  div.st-key-quick-actions > div { width: 100% !important; }
-  div.st-key-quick-actions .stButton > button { width: 100%; }
-  .acct-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-}
+        }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 </style>
 """

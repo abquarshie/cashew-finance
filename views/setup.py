@@ -26,6 +26,12 @@ def _categories(b):
     names = b.cats["name"].tolist()
     lower = [x.lower() for x in names]
     group_kind = dict(zip(b.cats["group_name"], b.cats["kind"]))
+    # a budget is set on a group or a category by name, so a category can't share a name with another group
+    group_lower = {g.lower(): g for g in b.groups}
+
+    def group_clash(category, group):
+        other = group_lower.get(category.strip().lower())
+        return other is not None and other.lower() != group.strip().lower()
 
     with card("cat-action"):
         if action == "Add":
@@ -46,6 +52,14 @@ def _categories(b):
             clash = name.strip().lower() in lower
             if clash:
                 field_msg(f"'{name.strip()}' already exists.")
+            elif final_group and group_clash(name, final_group):
+                clash = True
+                field_msg(f"'{name.strip()}' is the name of a group, so a budget couldn't tell them apart. "
+                          "Pick another name.")
+            elif group == "New group…" and new_group.strip().lower() in lower and new_group.strip().lower() != \
+                    name.strip().lower():
+                clash = True
+                field_msg(f"'{new_group.strip()}' is already a category name. Pick another group name.")
             ready = name.strip() and final_group and not clash and final_group.lower() not in (
                 [g.lower() for g in b.groups] if group == "New group…" else [])
             if st.button("Add category", type="primary", disabled=not ready, key="cat_add_btn", icon=":material/add:"):
@@ -66,6 +80,9 @@ def _categories(b):
                 field_msg("The name can't be empty.")
             elif clash:
                 field_msg(f"'{new_name}' already exists.")
+            elif new_name != sel and group_clash(new_name, new_group):
+                clash = True
+                field_msg(f"'{new_name}' is the name of a group, so a budget couldn't tell them apart.")
             used = int((b.tx["category"] == sel).sum()) if len(b.tx) else 0
             if new_name and new_name != sel and used:
                 field_msg(f"{used} past entr{'ies' if used != 1 else 'y'} will be renamed too.", "hint")
@@ -79,6 +96,7 @@ def _categories(b):
                         ("UPDATE transactions SET category=%s WHERE category=%s", (new_name, sel)),
                         ("UPDATE recurring_rules SET category=%s WHERE category=%s", (new_name, sel)),
                         ("UPDATE meals.ingredients SET category=%s WHERE category=%s", (new_name, sel)),
+                        ("UPDATE meals.recipes SET category=%s WHERE category=%s", (new_name, sel)),  # bought dishes
                         ("UPDATE budgets SET category=%s WHERE category=%s "
                          "AND NOT EXISTS (SELECT 1 FROM budgets WHERE category=%s)", (new_name, sel, new_name)),
                     ]
@@ -91,8 +109,12 @@ def _categories(b):
             g_pick = st.selectbox("Group", b.groups, key="grp_pick")
             g_name = st.text_input("New name", value=g_pick, key=f"grp_name_{g_pick}", max_chars=60).strip()
             clash = g_name != g_pick and g_name.lower() in [x.lower() for x in b.groups]
+            outside = set(b.cats.loc[b.cats["group_name"] != g_pick, "name"].str.lower())
             if clash:
                 field_msg(f"A group called '{g_name}' already exists.")
+            elif g_name != g_pick and g_name.lower() in outside:
+                clash = True
+                field_msg(f"'{g_name}' is a category in another group, so a budget couldn't tell them apart.")
             if st.button("Rename group", type="primary", disabled=not g_name or g_name == g_pick or clash, key="grp_save"):
                 run_many([
                     ("UPDATE categories SET group_name=%s WHERE group_name=%s", (g_name, g_pick)),
@@ -226,7 +248,7 @@ def _accounts(b):
 
         else:
             section("Assign older entries")
-            n = b.unassigned_count()
+            n = b.unassigned
             if not n:
                 empty("Every income and expense entry already has an account.")
             elif not b.account_names:

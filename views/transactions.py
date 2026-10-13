@@ -5,7 +5,7 @@ import streamlit as st
 
 from core.data import CURRENCY, KINDS, SHARED, book, money
 from core.db import run_many
-from ui.components import confirm, empty, flash, page_header, pill
+from ui.components import confirm, empty, esc, flash, page_header, pill
 
 EDIT_COLS = ["date", "category", "amount", "type", "account", "to_account", "member", "note"]
 NO_ACCOUNT = "—"
@@ -181,9 +181,9 @@ def render():
                 parts.append(f"{len(deletes)} to delete")
             st.markdown(f"**{' and '.join(parts)} not saved yet**")
             for e in errors:
-                st.html(f'<div class="field-msg error" style="margin:0">{e}</div>')
+                st.html(f'<div class="field-msg error" style="margin:0">{esc(e)}</div>')
             for w in warnings:
-                st.html(f'<div class="field-msg warn" style="margin:0">{w}</div>')
+                st.html(f'<div class="field-msg warn" style="margin:0">{esc(w)}</div>')
             row = st.container(horizontal=True)
             save = row.button("Save changes", type="primary", disabled=bool(errors), icon=":material/check:", key="tx_save")
             row.button("Discard", on_click=_bump, key="tx_discard")

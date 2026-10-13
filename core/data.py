@@ -32,9 +32,9 @@ TX_SQL = ("SELECT id, date, type, category, amount, note, member, account, to_ac
 SMALL = {
     "tx": (TX_COLS, TX_SQL),
     "budgets": (["category", "monthly_limit"], "SELECT category, monthly_limit FROM budgets ORDER BY category"),
-    "cats": (["name", "group_name", "kind"], "SELECT name, group_name, kind FROM categories ORDER BY id"),
-    "accts": (["name", "opening_balance", "spendable"],
-              "SELECT name, opening_balance, COALESCE(spendable, TRUE) AS spendable FROM accounts ORDER BY id"),
+    "cats": (["id", "name", "group_name", "kind"], "SELECT id, name, group_name, kind FROM categories ORDER BY id"),
+    "accts": (["id", "name", "opening_balance", "spendable"],
+              "SELECT id, name, opening_balance, COALESCE(spendable, TRUE) AS spendable FROM accounts ORDER BY id"),
     "rules": (["id", "name", "type", "amount", "fee", "category", "account", "to_account", "member", "note", "frequency",
                "start_date", "next_date", "run_count", "end_date", "active", "last_run"],
               "SELECT id, name, type, amount, fee, category, account, to_account, member, note, frequency, start_date, "
@@ -49,10 +49,16 @@ SMALL = {
     "users": (["id", "username", "display_name", "is_owner", "last_login", "created_at"],
               "SELECT id, username, display_name, is_owner, last_login, created_at FROM users ORDER BY id"),
     "features": (["key", "value"], "SELECT key, value FROM app_meta WHERE key LIKE 'feature_%'"),
+    # hashes of the sign-ins still valid, so an open browser is signed out once its session is ended elsewhere
+    "sessions": (["token_hash"], "SELECT token_hash FROM sessions WHERE expires_at > now()"),
 }
 SMALL_SQL = "SELECT " + ", ".join(
     f"(SELECT COALESCE(json_agg(t), '[]'::json) FROM ({sql}) t) AS {name}" for name, (_, sql) in SMALL.items())
 DATE_COLS = {"rules": ["start_date", "next_date", "end_date", "last_run"], "goals": ["deadline"], "contribs": ["date"]}
+# Postgres doesn't promise to keep a subquery's ORDER BY inside json_agg, and "same as last time",
+# the newest-first list and the default account depend on the order, so it's set again here.
+ORDER = {"tx": (["date", "id"], False), "contribs": (["date", "id"], False), "rules": (["id"], True),
+         "cats": (["id"], True), "accts": (["id"], True), "goals": (["id"], True), "users": (["id"], True)}
 
 
 def _as_dates(df, cols):
@@ -68,8 +74,11 @@ def _load_frames(conn):
         cur.execute(SMALL_SQL)
         row = cur.fetchone()
     for (name, (cols, _)), records in zip(SMALL.items(), row):
-        df = pd.DataFrame(records or [], columns=cols)
-        out[name] = _as_dates(df, DATE_COLS.get(name, []))
+        df = _as_dates(pd.DataFrame(records or [], columns=cols), DATE_COLS.get(name, []))
+        if ORDER.get(name) and len(df):
+            by, asc = ORDER[name]
+            df = df.sort_values(by, ascending=asc, kind="stable").reset_index(drop=True)
+        out[name] = df
     return out
 
 
@@ -127,6 +136,8 @@ class Book:
         self.rules = _text(_floats(rules, "amount", "fee"), "note", "to_account", "member") if len(rules) else rules
         self.goals = _floats(f["goals"], "target", "saved")
         self.contribs = _text(_floats(f["contribs"], "amount"), "note", "created_by")
+        sess = f.get("sessions")
+        self.live_tokens = set(sess["token_hash"]) if sess is not None else set()
         feats = f.get("features")
         self._features = dict(zip(feats["key"], feats["value"])) if feats is not None and len(feats) else {}
 
@@ -222,12 +233,10 @@ class Book:
 
     @cached_property
     def unassigned(self):
+        """Income and expense entries with no account (from before accounts existed)."""
         if not len(self.tx):
             return 0
         return int(((self.tx["account"] == "") & (self.tx["type"] != "Transfer")).sum())
-
-    def unassigned_count(self):
-        return self.unassigned
 
     def default_account(self, kind, col="account"):
         """The account last used for this type of entry, so the usual choice is already picked."""

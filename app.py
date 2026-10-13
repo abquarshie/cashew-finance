@@ -6,6 +6,7 @@ from pathlib import Path
 import streamlit as st
 
 from auto_rules import apply_recurring_rules
+from core import auth
 from core.data import book
 from core.db import init_db, invalidate, transact
 from ui import nav
@@ -51,10 +52,11 @@ if user is None:
     st.stop()
 
 # ---- signed in ----
-# Pick up name or role changes, and sign out anyone whose account was removed.
+# Pick up name or role changes, and sign out anyone whose account was removed, whose password the owner
+# reset, or whose sign-in has expired (checked against data that's already loaded: no extra database trip).
 _row = book().users[book().users["id"] == user["id"]]
-if not len(_row):
-    sign_out()
+if not len(_row) or auth.token_hash(st.session_state.get("_token")) not in book().live_tokens:
+    sign_out("You've been signed out. Please sign in again.")
     st.rerun()
 user = st.session_state["user"] = {**user, "name": _row["display_name"].iloc[0], "is_owner": bool(_row["is_owner"].iloc[0])}
 write_cookie()

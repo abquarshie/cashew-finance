@@ -36,14 +36,14 @@ def _finish_sign_in(user, remember):
     ss.pop("_signed_out", None)
 
 
-def sign_out():
+def sign_out(message="Signed out"):
     ss = st.session_state
     auth.end_session(ss.get("_token"))
     for k in [k for k in ss.keys() if k not in ("_flash",)]:
         del ss[k]
     ss["_cookie"] = ("", 0)
     ss["_signed_out"] = True
-    flash("Signed out", ":material/logout:")
+    flash(message, ":material/logout:")
 
 
 def write_cookie():

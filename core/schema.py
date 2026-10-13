@@ -132,6 +132,9 @@ TABLES = [
     "CREATE INDEX IF NOT EXISTS transactions_date_idx ON transactions (date DESC, id DESC)",
     # the double-entry check looks for the same category and amount
     "CREATE INDEX IF NOT EXISTS transactions_cat_amount_idx ON transactions (category, amount)",
+    # lookups by a linked row (each delete of a goal or a person checks these)
+    "CREATE INDEX IF NOT EXISTS goal_contributions_goal_idx ON goal_contributions (goal_id)",
+    "CREATE INDEX IF NOT EXISTS sessions_user_idx ON sessions (user_id)",
 ]
 
 

@@ -381,23 +381,6 @@ def suggest(recipes, items, pantry, fridge, recent, today, packs=None, limit=3):
     return [x for x in out if x["score"] > 0][:limit]
 
 
-def after_use(pantry, uses):
-    """Pantry after using ingredients. Never goes below zero; returns (new pantry, shortfalls)."""
-    new = dict(pantry)
-    short = []
-    for ing, base, q in uses:
-        have = float(new.get((ing, base), 0.0))
-        if q > have + 1e-9:
-            short.append((ing, base, q - have))
-        new[(ing, base)] = max(have - q, 0.0)
-    return new, short
-
-
-def leftovers(portions_cooked, eaten_now):
-    """Portions that go into the fridge after a meal."""
-    return max(float(portions_cooked) - float(eaten_now), 0.0)
-
-
 def take_portions(batches, wanted):
     """Take portions from fridge batches, oldest eat-by first.
 

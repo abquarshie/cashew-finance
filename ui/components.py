@@ -54,8 +54,8 @@ def show_flash():
 
 
 # ---- KPI cards ---------------------------------------------------------------
-def kpi_html(label, value, sub="", featured=False):
-    cls = "kpi featured" if featured else "kpi"
+def kpi_html(label, value, sub=""):
+    cls = "kpi"
     sub_html = f'<div class="kpi-sub">{sub}</div>' if sub else ""
     return f'<div class="{cls}"><div class="kpi-label">{esc(label)}</div><div class="kpi-value">{esc(value)}</div>{sub_html}</div>'
 
@@ -168,15 +168,6 @@ def feed_html(items, show_who=False, names=None):
             f'<div class="amt {cls}">{amount}</div></div>'
         )
     return f'<div class="feed">{"".join(out)}</div>'
-
-
-def accounts_html(balances):
-    cards = "".join(
-        f'<div class="acct"><div class="acct-name">{esc(name)}</div>'
-        f'<div class="acct-bal{" neg" if value < 0 else ""}">{money(value)}</div></div>'
-        for name, value in balances.items()
-    )
-    return f'<div class="acct-grid">{cards}</div>'
 
 
 # ---- confirmation ---------------------------------------------------------------

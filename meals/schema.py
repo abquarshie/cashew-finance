@@ -208,6 +208,12 @@ TABLES += [
     )
     """,
     "CREATE INDEX IF NOT EXISTS plan_day_slot_idx ON meals.plan (day, slot)",
+    # lookups by a linked row: cooking reads a recipe's lines and its leftovers, price history joins trips
+    "CREATE INDEX IF NOT EXISTS recipe_items_recipe_idx ON meals.recipe_items (recipe_id)",
+    "CREATE INDEX IF NOT EXISTS pairing_items_pairing_idx ON meals.pairing_items (pairing_id)",
+    "CREATE INDEX IF NOT EXISTS fridge_recipe_idx ON meals.fridge (recipe_id)",
+    "CREATE INDEX IF NOT EXISTS trip_items_trip_idx ON meals.trip_items (trip_id)",
+    "CREATE INDEX IF NOT EXISTS plan_recipe_idx ON meals.plan (recipe_id)",
 ]
 
 # Backup and restore order (parents before children).

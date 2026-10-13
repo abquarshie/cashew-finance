@@ -8,7 +8,6 @@ cached loaders in core/data.py; every write clears that cache.
 Reads run in autocommit mode: a transaction costs a BEGIN and a COMMIT, each its
 own round trip, so a single read inside one took three trips instead of one.
 """
-import pandas as pd
 import psycopg2
 import streamlit as st
 from psycopg2.pool import ThreadedConnectionPool
@@ -26,6 +25,21 @@ def _pool(dsn):
     )
 
 
+def _borrow(pool, wait=10.0):
+    """A connection from the pool. When all are busy (several people using the app at once), wait a moment
+    for one to come free instead of failing straight away, as the pool itself would."""
+    import time
+    from psycopg2.pool import PoolError
+    deadline = time.monotonic() + wait
+    while True:
+        try:
+            return pool.getconn()
+        except PoolError:
+            if time.monotonic() > deadline:
+                raise
+            time.sleep(0.05)
+
+
 def transact(fn, read_only=False):
     """Run fn(conn) as one transaction on a pooled connection and return its result.
     read_only=True skips the transaction (and its two extra round trips) for plain reads.
@@ -35,7 +49,7 @@ def transact(fn, read_only=False):
     """
     pool = _pool(st.secrets["DATABASE_URL"])
     for attempt in (1, 2):
-        conn = pool.getconn()
+        conn = _borrow(pool)
         broken = False
         try:
             if read_only:
@@ -62,15 +76,6 @@ def transact(fn, read_only=False):
             pool.putconn(conn, close=broken or conn.closed != 0)
 
 
-def query(sql, params=None):
-    """Run one SELECT and return a DataFrame."""
-    def work(conn):
-        with conn.cursor() as cur:
-            cur.execute(sql, params)
-            return pd.DataFrame(cur.fetchall(), columns=[c[0] for c in cur.description])
-    return transact(work, read_only=True)
-
-
 def fetch_one(sql, params=None):
     def work(conn):
         with conn.cursor() as cur:
@@ -95,10 +100,13 @@ def execute(sql, params=None, refresh=True):
 
 
 def invalidate():
-    """Throw away cached data so every open session sees the change on its next tap."""
+    """Throw away cached data (money and kitchen) so every open session sees the change on its next tap.
+    Each reload is a single round trip, so refreshing both is cheaper than ever showing stale data."""
     st.cache_data.clear()
     from core.data import load_book
+    from meals.data import load_kitchen
     load_book.clear()
+    load_kitchen.clear()
 
 
 @st.cache_resource(show_spinner=False)

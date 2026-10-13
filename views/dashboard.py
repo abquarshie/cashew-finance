@@ -161,7 +161,7 @@ def _balances(b, s2s):
         st.caption(f"Safe to spend is your everyday money ({money(s2s['money'])}) minus {money(s2s['bills'])} in "
                    f"repeat bills before payday and {money(s2s['budget_left'])} still to spend in budgets. "
                    "Savings accounts aren't counted.")
-        unassigned = b.unassigned_count()
+        unassigned = b.unassigned
         if unassigned:
             field_msg(f"{unassigned} older entr{'ies have' if unassigned != 1 else 'y has'} no account, so balances "
                       "may be off. Fix this in Settings → Accounts.", "warn")

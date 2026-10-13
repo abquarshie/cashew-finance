@@ -185,13 +185,16 @@ def set_password(user_id, new, username=""):
         ("UPDATE users SET password_hash = %s, failed_logins = 0, locked_until = NULL WHERE id = %s",
          (hash_password(new), user_id)),
         ("DELETE FROM sessions WHERE user_id = %s", (user_id,)),
-    ], refresh=False)
+    ])  # refresh, so their open browsers notice and sign out
     return None
 
 
 # ---- remembered sessions -----------------------------------------------------
-def _token_hash(token):
-    return hashlib.sha256(token.encode()).hexdigest()
+def token_hash(token):
+    return hashlib.sha256((token or "").encode()).hexdigest()
+
+
+_token_hash = token_hash
 
 
 def start_session(user_id, remember):
@@ -202,7 +205,7 @@ def start_session(user_id, remember):
         ("DELETE FROM sessions WHERE expires_at < now()", None),
         ("INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (%s, %s, now() + %s)",
          (_token_hash(token), user_id, lifetime)),
-    ], refresh=False)
+    ])  # refresh, so the new session is in the list of live ones straight away
     return token, int(lifetime.total_seconds()) if remember else None
 
 

@@ -21,6 +21,17 @@ def occurrence(start, frequency, n):
     return start + relativedelta(months=n)
 
 
+def catch_up(start, frequency, n, today=None):
+    """The run number of the first date from today on, skipping the dates a rule wasn't running
+    (paused, or finished and then extended), so they aren't all added at once."""
+    today = today or date.today()
+    guard = 0
+    while occurrence(start, frequency, n) < today and guard < 5000:
+        n += 1
+        guard += 1
+    return n
+
+
 def apply_recurring_rules(conn, today=None):
     """Create every auto transaction that is due and return how many were added.
 

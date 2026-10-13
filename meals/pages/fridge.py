@@ -15,7 +15,7 @@ FLAG = {"past": ("Past eat-by", "out"), "soon": ("Eat soon", "warn"), "low": ("R
 
 
 def _ate_one(batch_id, portions):
-    actions.set_portions(batch_id, max(portions - 1, 0))
+    actions.eat_portion(batch_id, min(1.0, portions))
 
 
 def _bin(batch_id, label, value_each):

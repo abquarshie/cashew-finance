@@ -53,6 +53,18 @@ def base_of(unit):
     return unit or "pcs"
 
 
+def make_pack(unit, pack_name, pack_size, loose_too=False, alt_units=None):
+    """An item's pack tuple from its database columns, or None when it has no container.
+    The one place this is built, so the screens and the actions always agree on units."""
+    try:
+        size = float(pack_size) if pack_size is not None else 0.0
+    except (TypeError, ValueError):
+        size = 0.0
+    if not pack_name or not size or size != size or size <= 0:  # size != size: NaN
+        return None
+    return pack_name, size, base_of(unit), bool(loose_too), alt_units if isinstance(alt_units, dict) else {}
+
+
 def loose(pack):
     """True when the item is bought by the piece even though it also comes in a container."""
     return bool(pack and len(pack) > 3 and pack[3])
@@ -98,10 +110,6 @@ def to_base(qty, unit, pack=None):
     return qty, unit or "pcs"
 
 
-def same_kind(unit_a, unit_b):
-    return base_of(unit_a) == base_of(unit_b)
-
-
 def _num(x):
     """1.0 -> '1', 1.5 -> '1.5', 0.333 -> '0.33'."""
     s = f"{x:,.2f}".rstrip("0").rstrip(".")
@@ -124,9 +132,6 @@ def frac(x):
         if abs(rest - value) < 0.01:
             return (f"{whole:,}" if whole else "") + sign
     return _num(x)
-
-
-QUICK = [0.25, 0.5, 1, 1.5, 2, 3]  # one-tap amounts on a phone, where typing "1/2" isn't possible
 
 
 def fmt(qty, base, usual=None):
