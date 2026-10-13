@@ -143,9 +143,46 @@ TABLES += [
     "ALTER TABLE meals.ingredients ADD COLUMN IF NOT EXISTS kind VARCHAR(10) NOT NULL DEFAULT 'food'",
 ]
 
+TABLES += [
+    # food bought ready-made (kenkey, waakye…): a recipe marked bought, with its usual price, unit and seller
+    "ALTER TABLE meals.recipes ADD COLUMN IF NOT EXISTS bought BOOLEAN NOT NULL DEFAULT FALSE",
+    "ALTER TABLE meals.recipes ADD COLUMN IF NOT EXISTS price NUMERIC(12, 2)",          # usual price for one unit
+    "ALTER TABLE meals.recipes ADD COLUMN IF NOT EXISTS count_unit VARCHAR(12)",        # ball, pack, portion…
+    "ALTER TABLE meals.recipes ADD COLUMN IF NOT EXISTS shop VARCHAR(60)",
+    "ALTER TABLE meals.recipes ADD COLUMN IF NOT EXISTS category VARCHAR(50)",          # money category when paid
+    # a one-off bought item typed straight into the plan ("Fried yam from the roadside")
+    "ALTER TABLE meals.plan ADD COLUMN IF NOT EXISTS label VARCHAR(80)",
+    "ALTER TABLE meals.plan ADD COLUMN IF NOT EXISTS price NUMERIC(12, 2)",
+    """
+    DO $$ BEGIN
+      IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'plan_check') THEN
+        ALTER TABLE meals.plan DROP CONSTRAINT plan_check;
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'plan_has_something') THEN
+        ALTER TABLE meals.plan ADD CONSTRAINT plan_has_something
+          CHECK (recipe_id IS NOT NULL OR ingredient_id IS NOT NULL OR label IS NOT NULL);
+      END IF;
+    END $$
+    """,
+    # what was paid for bought food, for price trends
+    """
+    CREATE TABLE IF NOT EXISTS meals.bought (
+        id SERIAL PRIMARY KEY,
+        date DATE NOT NULL,
+        plan_id INTEGER REFERENCES meals.plan(id) ON DELETE SET NULL,
+        recipe_id INTEGER REFERENCES meals.recipes(id) ON DELETE SET NULL,
+        label VARCHAR(80) NOT NULL,
+        qty NUMERIC(12, 3) NOT NULL,
+        unit VARCHAR(12) NOT NULL,
+        paid NUMERIC(12, 2) NOT NULL,
+        shop VARCHAR(60)
+    )
+    """,
+]
+
 # Backup and restore order (parents before children).
 BACKUP_TABLES = ["meals.ingredients", "meals.recipes", "meals.recipe_items", "meals.plan", "meals.fridge",
-                 "meals.pantry", "meals.prices", "meals.trips", "meals.trip_items", "meals.waste"]
+                 "meals.pantry", "meals.prices", "meals.trips", "meals.trip_items", "meals.waste", "meals.bought"]
 
 
 def ensure_meals_schema(cur):

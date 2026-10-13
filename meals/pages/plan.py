@@ -3,19 +3,19 @@ from datetime import date, datetime, timedelta
 import streamlit as st
 
 from core.data import book as money_book
-from core.data import money
+from core.data import CURRENCY, money
 from meals import actions
 from meals.briefing import entry_status, guard
 from meals.data import kitchen
-from meals.logic import (OPEN, SLOTS, cost_of, recipe_cost, repeat_plan, shopping_list, shortfall, suggest,
-                          total_needs)
-from meals.units import QUICK, fmt, frac, plural, to_base, units_for
+from meals.logic import (OPEN, SLOTS, bought_cost, cost_of, recipe_cost, repeat_plan, shopping_list, shortfall,
+                          suggest, total_needs)
+from meals.units import fmt, frac, plural, to_base, units_for
 from meals.widget import today_card
 from ui.components import card, empty, esc, field_msg, flash, page_header, pill
 from ui.nav import go
 
 VIEWS = ["Next 2 weeks", "Past 2 weeks"]
-DONE_LABEL = {"cooked": "Cooked", "from_fridge": "From the fridge", "done": "Eaten"}
+DONE_LABEL = {"cooked": "Cooked", "from_fridge": "From the fridge", "done": "Eaten", "bought": "Bought"}
 SPANS = ["Next 7 days", "Days 8 to 14"]
 
 
@@ -56,29 +56,83 @@ def _remove(entry_id):
     flash("Removed from the plan", ":material/delete:")
 
 
+def _detail(k, e):
+    if k.is_bought(e):
+        _, unit = k.bought_price(e)
+        return f"{frac(e['qty'])} {plural(unit, e['qty'])}"
+    if e["recipe_id"]:
+        return f"{frac(e['qty'])} {plural('portion', e['qty'])}"
+    return fmt(*to_base(e["qty"], e["unit"] or "pcs"))  # 1.5 kg, 2½ bunches, ½ crate
+
+
+def _food_category(k, b, e):
+    """Where a payment for bought food is logged: the dish's own category, else Dining Out, else any food one."""
+    cats = b.category_names("Expense")
+    own = k.recipes.get(e.get("recipe_id"), {}).get("category") if e.get("recipe_id") else None
+    for c in (own, "Dining Out", *sorted(k.food_categories)):
+        if c and c in cats:
+            return c
+    return cats[0] if cats else None
+
+
+@st.dialog("Bought it", width="small")
+def _pay(entry_id):
+    """Ticking bought food: what was paid and from which account. It's saved as an expense."""
+    k, b = kitchen(), money_book()
+    e = next((x for x in k.plan if x["id"] == entry_id), None)
+    if not e:
+        st.rerun()
+    price, unit = k.bought_price(e)
+    st.markdown(f"**{k.entry_name(e)}** · {_detail(k, e)}")
+    paid = st.number_input(f"Paid ({CURRENCY})", min_value=0.0, step=1.0, format="%.2f", key=f"meal_pay_amt_{entry_id}",
+                           value=round(float(price) * float(e["qty"]), 2) if price else None, placeholder="0.00")
+    accounts = b.account_names
+    key = f"meal_pay_acct_{entry_id}"
+    if st.session_state.get(key) not in accounts:
+        st.session_state[key] = b.default_account("Expense") if b.default_account("Expense") in accounts else (
+            accounts[0] if accounts else None)
+    st.pills("Paid from", accounts, key=key, required=True)
+    cats = b.category_names("Expense")
+    default = _food_category(k, b, e)
+    cat = st.selectbox("Logged under", cats, index=cats.index(default) if default in cats else 0,
+                       key=f"meal_pay_cat_{entry_id}")
+    if st.button("Save", type="primary", width="stretch", disabled=not paid, key=f"meal_pay_go_{entry_id}",
+                 icon=":material/check:"):
+        actions.mark_bought(entry_id, paid, st.session_state.get(key), cat)
+        flash(f"Saved {money(paid)} for {k.entry_name(e)} under {cat}", ":material/shopping_bag:")
+        st.rerun()
+    st.caption("Saved as an expense, so there's no need to add it again. Untick the dish to take it back out.")
+
+
 def _entry_row(k, e, today):
-    kind = "recipe" if e["recipe_id"] else "item"
+    bought = k.is_bought(e)
+    kind = "bought" if bought else ("recipe" if e["recipe_id"] else "item")
     name = k.entry_name(e)
-    if kind == "recipe":
-        detail = f"{frac(e['qty'])} {plural('portion', e['qty'])}"
-    else:
-        unit = e["unit"] or "pcs"
-        detail = fmt(*to_base(e["qty"], unit))  # 1.5 kg, 2½ bunches, ½ crate
+    detail = _detail(k, e)
     done = e["status"] != OPEN
-    if done:
-        label = f"{name} · {detail} · {DONE_LABEL[e['status']]}"
-    elif e["day"] >= today:
-        status, _ = entry_status(k, e, today)
-        m = k.meal_status(e["id"], today) or {}
-        short = len(m.get("missing", []))
-        tag = {"ready": "✅", "leftovers": "🥡 fridge", "short": f"🛒 {short} to buy"}.get(status, "")
-        label = f"{name} · {detail} {tag}".rstrip()
-    else:
-        label = f"{name} · {detail}"
     row = st.container(horizontal=True, vertical_alignment="center", key=f"meal-entry-{e['id']}")
-    row.checkbox(label, value=done, key=f"meal_e{e['id']}_{e['status']}", on_change=_toggle,
-                 args=(e["id"], kind, e["status"]), width="stretch",
-                 help="Tick when it's cooked (or eaten, for fruit and other items). Untick to undo.")
+    if bought and not done:
+        _, tag = entry_status(k, e, today)
+        row.html(f'<div class="bought-row">{esc(name)} · {esc(detail)} <span class="muted">🛍️ {esc(tag)}</span></div>',
+                 width="stretch")
+        if row.button("Bought", key=f"meal_buy_{e['id']}", icon=":material/shopping_bag:",
+                      help="Say what you paid; it's saved as an expense"):
+            _pay(e["id"])
+    else:
+        if done:
+            label = f"{name} · {detail} · {DONE_LABEL.get(e['status'], 'Done')}"
+        elif e["day"] >= today:
+            status, _ = entry_status(k, e, today)
+            m = k.meal_status(e["id"], today) or {}
+            short = len(m.get("missing", []))
+            tag = {"ready": "✅", "leftovers": "🥡 fridge", "short": f"🛒 {short} to buy"}.get(status, "")
+            label = f"{name} · {detail} {tag}".rstrip()
+        else:
+            label = f"{name} · {detail}"
+        row.checkbox(label, value=done, key=f"meal_e{e['id']}_{e['status']}", on_change=_toggle,
+                     args=(e["id"], kind, e["status"]), width="stretch",
+                     help="Untick to take the payment back out." if bought else
+                     "Tick when it's cooked (or eaten, for fruit and other items). Untick to undo.")
     if not done and kind == "recipe":
         have = k.fridge_portions(e["recipe_id"], today)
         if have > 0:
@@ -88,15 +142,20 @@ def _entry_row(k, e, today):
                args=(e["id"],), help="Remove from the plan")
 
 
-def _quick_qty():
-    q = st.session_state.get("meal_add_quick")
-    if q is not None:
-        st.session_state["meal_add_qty"] = float(q)
-    st.session_state["meal_add_quick"] = None
+ONE_OFF_UNITS = ["portion", "piece", "ball", "pack", "plate", "bowl", "loaf", "bottle", "sachet"]
+
+
+def _option_label(k, key):
+    kind, i = key.split(":")
+    i = int(i)
+    if kind == "r":
+        return k.recipes[i]["name"] + (" 🛍️" if k.recipes[i]["bought"] else "")
+    return f"{k.names.get(i, '?')} (item)"
 
 
 @st.fragment
 def _add_form():
+    """Pick the day and meal once, then one or more dishes, each with its own amount, and add them together."""
     ss = st.session_state
     k = kitchen()
     today = date.today()
@@ -110,58 +169,81 @@ def _add_form():
     st.pills("Day", days, key="meal_add_day", required=True, format_func=lambda d: "Today" if d == today else (
         "Tomorrow" if d == today + timedelta(days=1) else f"{d:%a %d}"))
     st.pills("Meal", SLOTS, key="meal_add_slot", required=True)  # tapping the picked one again keeps it
-    what = st.segmented_control("What", ["Recipe", "Fruit or other item"], default="Recipe", key="meal_add_what",
-                                label_visibility="collapsed") or "Recipe"
     day, slot = ss.get("meal_add_day") or days[0], ss.get("meal_add_slot") or "Supper"
 
-    if what == "Recipe":
-        if not k.recipes:
-            field_msg("Add a recipe first, under Meals → Recipes.", "hint")
-            go("meals", "Recipes", label="Open recipes", icon=":material/menu_book:")
-            return
-        rid = st.selectbox("Recipe", list(k.recipes), index=None, placeholder="Choose a dish",
-                           format_func=lambda i: k.recipes[i]["name"], key="meal_add_recipe")
-        portions = st.number_input("Portions to cook", min_value=0.25, max_value=100.0, step=0.5, format="%g",
-                                   value=float(k.recipes[rid]["portions"]) if rid else float(max(k.household, 1)),
-                                   key=f"meal_add_portions_{rid}", help="Halves and quarters are fine: 2.5, 0.5…")
-        if rid:
-            batch, each, unknown = recipe_cost(rid, k.recipes, k.items, k.prices, k.packs)
+    options = ([f"r:{i}" for i in sorted(k.recipes, key=lambda i: k.recipes[i]["name"].lower())]
+               + [f"i:{i}" for i in sorted(k.food_names, key=lambda i: k.food_names[i].lower())])
+    if not options:
+        field_msg("Add a recipe or an ingredient first, under Meals → Recipes.", "hint")
+        go("meals", "Recipes", label="Open recipes", icon=":material/menu_book:")
+    ver = ss.get("meal_add_ver", 0)  # a fresh form after each add (clearing a widget's value isn't reliable)
+    picked = st.multiselect("Dishes", options, key=f"meal_add_pick_{ver}", format_func=lambda x: _option_label(k, x),
+                            placeholder="One or more: jollof, kenkey 🛍️, bananas…",
+                            help="🛍️ means bought ready-made. Add those in Recipes, or type a one-off below.")
+    lines = []
+    for key in picked:
+        kind, i = key.split(":")
+        i = int(i)
+        name = _option_label(k, key).replace(" 🛍️", "").replace(" (item)", "")
+        if kind == "r" and k.recipes[i]["bought"]:
+            r = k.recipes[i]
+            unit = r["count_unit"]
+            qty = st.number_input(f"{name} ({plural(unit)})", min_value=0.25, step=0.5, format="%g",
+                                  value=float(max(k.household, 1)), key=f"meal_add_q_{ver}_{key}")
+            if r["price"]:
+                field_msg(f"About {money(r['price'] * qty)}, paid on the day" + (f" at {r['shop']}" if r["shop"] else "")
+                          + ".", "hint")
+            lines.append(dict(recipe_id=i, qty=qty))
+        elif kind == "r":
+            qty = st.number_input(f"{name} (portions to cook)", min_value=0.25, max_value=100.0, step=0.5, format="%g",
+                                  value=float(k.recipes[i]["portions"]), key=f"meal_add_q_{ver}_{key}",
+                                  help="Halves and quarters are fine: 2.5, 0.5…")
+            have = k.fridge_portions(i)
+            left = qty - min(k.household, qty)
+            notes = []
+            batch, each, unknown = recipe_cost(i, k.recipes, k.items, k.prices, k.packs)
             if batch:
-                field_msg(f"{'At least' if unknown else 'About'} {money(each)} a portion, "
-                          f"{money(each * portions)} for {frac(portions)}.", "hint")
-            have = k.fridge_portions(rid)
+                notes.append(f"{'at least' if unknown else 'about'} {money(each * qty)}")
             if have:
-                field_msg(f"There are {frac(have)} portions of this in the fridge already.", "hint")
-            left = portions - min(k.household, portions)
+                notes.append(f"{frac(have)} already in the fridge")
             if left > 0:
-                field_msg(f"{k.household} eat at the meal; {frac(left)} {plural('portion', left)} will go into "
-                          "the fridge.", "hint")
-        ok = rid is not None
-        args = dict(recipe_id=rid, qty=portions)
-    else:
-        if not k.food_names:
-            field_msg("Add ingredients first, under Meals → Recipes.", "hint")
-            return
-        ing = st.selectbox("Item", list(k.food_names), index=None, placeholder="e.g. Bananas",
-                           format_func=lambda i: k.names[i], key="meal_add_item")
-        st.pills("Quick amount", QUICK, key="meal_add_quick", format_func=frac, on_change=_quick_qty,
-                 label_visibility="collapsed")
+                notes.append(f"{frac(left)} {plural('portion', left)} will go into the fridge")
+            if notes:
+                field_msg(notes[0][0].upper() + "; ".join(notes)[1:] + ".", "hint")
+            lines.append(dict(recipe_id=i, qty=qty))
+        else:
+            c1, c2 = st.columns(2)
+            qty = c1.number_input(f"{name} (how much)", min_value=0.0, value=1.0, step=0.5, format="%g",
+                                  key=f"meal_add_q_{ver}_{key}")
+            units = units_for(k.unit_of[i], k.pack(i))
+            unit = c2.selectbox(f"{name} unit", units, key=f"meal_add_u_{ver}_{key}", label_visibility="collapsed")
+            if qty:
+                lines.append(dict(ingredient_id=i, qty=qty, unit=unit))
+
+    if st.toggle("Add something bought outside, just this once", key=f"meal_add_once_{ver}",
+                 help="Fried yam from the roadside, a plate of waakye… without saving it as a dish."):
+        once = st.text_input("What", key=f"meal_add_once_name_{ver}", max_chars=80,
+                             placeholder="e.g. Fried yam from the roadside").strip()
         c1, c2 = st.columns(2)
-        qty = c1.number_input("How much", min_value=0.0, value=None, step=0.25, placeholder="0", key="meal_add_qty",
-                              format="%g")
-        units = units_for(k.unit_of[ing], k.pack(ing)) if ing else ["pcs"]
-        unit = c2.selectbox("Unit", units, key=f"meal_add_unit_{ing}")
-        ok = ing is not None and bool(qty)
-        args = dict(ingredient_id=ing, qty=qty or 0, unit=unit)
+        once_qty = c1.number_input("How many", min_value=0.25, value=1.0, step=0.5, format="%g", key=f"meal_add_once_qty_{ver}")
+        once_unit = c2.selectbox("Counted in", ONE_OFF_UNITS, key=f"meal_add_once_unit_{ver}")
+        once_price = st.number_input(f"Price for one {once_unit} ({CURRENCY}), if you know it", min_value=0.0,
+                                     value=None, step=1.0, format="%.2f", key=f"meal_add_once_price_{ver}")
+        if once:
+            lines.append(dict(label=once, qty=once_qty, unit=once_unit, price=once_price or None))
 
     when = "today" if day == today else ("tomorrow" if day == today + timedelta(days=1) else f"{day:%a %d}")
-    if st.button(f"Add to {when}, {slot.lower()}", type="primary", disabled=not ok, width="stretch",
-                 key="meal_add_go", icon=":material/add:"):
-        actions.add_to_plan(day, slot, **args)
-        ss.pop("meal_add_recipe", None)
-        ss.pop("meal_add_item", None)
-        ss.pop("meal_add_qty", None)
-        flash(f"Added to {when}, {slot.lower()}")
+    n = len(lines)
+    label = f"Add {n} to {when}, {slot.lower()}" if n > 1 else f"Add to {when}, {slot.lower()}"
+    if st.button(label, type="primary", disabled=not n, width="stretch", key="meal_add_go", icon=":material/add:"):
+        actions.add_many([{"day": day, "slot": slot, "recipe_id": ln.get("recipe_id"),
+                           "ingredient_id": ln.get("ingredient_id"), "qty": ln["qty"], "unit": ln.get("unit"),
+                           "label": ln.get("label"), "price": ln.get("price")} for ln in lines])
+        for key in [x for x in ss.keys() if str(x).startswith(("meal_add_q_", "meal_add_u_", "meal_add_once_",
+                                                               "meal_add_pick_"))]:
+            ss.pop(key, None)
+        ss["meal_add_ver"] = ver + 1
+        flash(f"Added {n} to {when}, {slot.lower()}" if n > 1 else f"Added to {when}, {slot.lower()}")
         st.rerun()
 
 
@@ -261,6 +343,8 @@ def _cost_line(k, today):
         return
     needs = total_needs(entries, k.recipes, k.items, packs=k.packs)
     meals_cost, unknown = cost_of(needs, k.prices)
+    bought, bought_unknown = bought_cost(entries, k.recipes)  # kenkey and other food bought on the day
+    meals_cost, unknown = meals_cost + bought, unknown + bought_unknown
     to_buy = shopping_list(shortfall(k.allocation(today), entries), {}, prices=k.prices, packs=k.packs)
     buy_cost = sum(r["est"] or 0 for r in to_buy)
     buy_unknown = sum(1 for r in to_buy if r["est"] is None)
@@ -296,7 +380,8 @@ def _suggestions(k, today):
     if not k.recipes:
         return
     recent = [e for e in k.plan if e["day"] >= today - timedelta(days=21)]
-    ideas = suggest(k.recipes, k.items, k.pantry, k.fridge, recent, today, packs=k.packs)
+    home = {i: r for i, r in k.recipes.items() if not r["bought"]}  # ideas are about using up what's at home
+    ideas = suggest(home, k.items, k.pantry, k.fridge, recent, today, packs=k.packs)
     if not ideas:
         return
     ss = st.session_state

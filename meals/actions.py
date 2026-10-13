@@ -59,12 +59,12 @@ def _recipe(cur, recipe_id):
 
 
 def _entry(cur, entry_id):
-    cur.execute("SELECT id, day, slot, recipe_id, ingredient_id, qty, unit, status, undo FROM meals.plan "
+    cur.execute("SELECT id, day, slot, recipe_id, ingredient_id, qty, unit, status, undo, label, price FROM meals.plan "
                 "WHERE id = %s FOR UPDATE", (entry_id,))
     row = cur.fetchone()
     if not row:
         return None
-    keys = ["id", "day", "slot", "recipe_id", "ingredient_id", "qty", "unit", "status", "undo"]
+    keys = ["id", "day", "slot", "recipe_id", "ingredient_id", "qty", "unit", "status", "undo", "label", "price"]
     e = dict(zip(keys, row))
     e["qty"] = float(e["qty"])
     return e
@@ -140,9 +140,53 @@ def mark_done(entry_id):
     _run(work)
 
 
+def mark_bought(entry_id, paid, account, category):
+    """Bought food was bought: the payment goes into the money records as an expense, the price is remembered
+    for next time (and for price trends), and unticking takes it all back out."""
+    from core.data import SHARED
+
+    def work(conn):
+        with conn.cursor() as cur:
+            e = _entry(cur, entry_id)
+            if not e or e["status"] != OPEN:
+                return None
+            if e["recipe_id"]:
+                cur.execute("SELECT name, count_unit, shop, price FROM meals.recipes WHERE id = %s", (e["recipe_id"],))
+                name, unit, shop, before = cur.fetchone()
+            else:
+                name, unit, shop, before = e["label"], e["unit"], None, None
+            unit = unit or "portion"
+            when = min(e["day"], date.today())
+            from meals.units import frac, plural
+            note = f"Bought: {name} ({frac(e['qty'])} {plural(unit, e['qty'])})" + (f" at {shop}" if shop else "")
+            cur.execute("INSERT INTO transactions (date, type, category, amount, note, member, account, created_by) "
+                        "VALUES (%s, 'Expense', %s, %s, %s, %s, %s, %s) RETURNING id",
+                        (when, category, round(float(paid), 2), note, SHARED, account, _me()))
+            tx = cur.fetchone()[0]
+            cur.execute("INSERT INTO meals.bought (date, plan_id, recipe_id, label, qty, unit, paid, shop) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+                        (when, e["id"], e["recipe_id"], name, e["qty"], unit, float(paid), shop))
+            bought_id = cur.fetchone()[0]
+            if e["recipe_id"] and e["qty"]:
+                cur.execute("UPDATE meals.recipes SET price = %s WHERE id = %s",
+                            (round(float(paid) / float(e["qty"]), 2), e["recipe_id"]))
+            undo = {"tx": tx, "bought": bought_id, "price_before": float(before) if before is not None else None}
+            cur.execute("UPDATE meals.plan SET status = 'bought', done_at = now(), done_by = %s, undo = %s WHERE id = %s",
+                        (_me(), json.dumps(undo), e["id"]))
+            return tx
+    out = _run(work)
+    invalidate()  # the new expense shows on the money side straight away
+    return out
+
+
 def _reverse(cur, e):
-    """Undo what ticking this entry did to the pantry and fridge."""
+    """Undo what ticking this entry did to the pantry and fridge (or, for bought food, the payment)."""
     undo = e["undo"] or {}
+    if undo.get("tx"):
+        cur.execute("DELETE FROM transactions WHERE id = %s", (undo["tx"],))
+        cur.execute("DELETE FROM meals.bought WHERE id = %s", (undo.get("bought"),))
+        if e.get("recipe_id") and "price_before" in undo:
+            cur.execute("UPDATE meals.recipes SET price = %s WHERE id = %s", (undo["price_before"], e["recipe_id"]))
     for ing, base, q in undo.get("pantry") or []:
         _add_stock(cur, ing, base, float(q))
     made = undo.get("fridge_made")
@@ -163,14 +207,16 @@ def untick(entry_id):
             cur.execute("UPDATE meals.plan SET status = 'planned', done_at = NULL, done_by = NULL, undo = NULL "
                         "WHERE id = %s", (e["id"],))
     _run(work)
+    invalidate()  # in case a payment for bought food came back out
 
 
 # ---- the plan ---------------------------------------------------------------------------------
-def add_to_plan(day, slot, recipe_id=None, ingredient_id=None, qty=1, unit=None):
+def add_to_plan(day, slot, recipe_id=None, ingredient_id=None, qty=1, unit=None, label=None, price=None):
     def work(conn):
         with conn.cursor() as cur:
-            cur.execute("INSERT INTO meals.plan (day, slot, recipe_id, ingredient_id, qty, unit) "
-                        "VALUES (%s, %s, %s, %s, %s, %s)", (day, slot, recipe_id, ingredient_id, qty, unit))
+            cur.execute("INSERT INTO meals.plan (day, slot, recipe_id, ingredient_id, qty, unit, label, price) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                        (day, slot, recipe_id, ingredient_id, qty, unit, label, price))
     _run(work)
 
 
@@ -179,9 +225,10 @@ def add_many(entries):
     def work(conn):
         with conn.cursor() as cur:
             for e in entries:
-                cur.execute("INSERT INTO meals.plan (day, slot, recipe_id, ingredient_id, qty, unit) "
-                            "VALUES (%s, %s, %s, %s, %s, %s)",
-                            (e["day"], e["slot"], e["recipe_id"], e["ingredient_id"], e["qty"], e["unit"]))
+                cur.execute("INSERT INTO meals.plan (day, slot, recipe_id, ingredient_id, qty, unit, label, price) "
+                            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                            (e["day"], e["slot"], e.get("recipe_id"), e.get("ingredient_id"), e["qty"], e.get("unit"),
+                             e.get("label"), e.get("price")))
         return len(entries)
     return _run(work)
 
@@ -194,6 +241,7 @@ def remove_from_plan(entry_id):
                 _reverse(cur, e)  # removing a ticked meal puts its ingredients and portions back
             cur.execute("DELETE FROM meals.plan WHERE id = %s", (entry_id,))
     _run(work)
+    invalidate()
 
 
 def copy_week(from_start, to_start, not_before=None, days=7):
@@ -311,7 +359,7 @@ def save_recipe(recipe_id, name, portions, keeps_days, prep_note, prep_hours, me
             fields = (name.strip(), round(float(portions), 2), int(keeps_days), prep_note or None, prep_hours or None, method or None)
             if recipe_id:
                 cur.execute("UPDATE meals.recipes SET name=%s, portions=%s, keeps_days=%s, prep_note=%s, prep_hours=%s, "
-                            "method=%s WHERE id=%s", fields + (recipe_id,))
+                            "method=%s, bought=FALSE WHERE id=%s", fields + (recipe_id,))
                 rid = recipe_id
                 cur.execute("DELETE FROM meals.recipe_items WHERE recipe_id = %s", (rid,))
             else:
@@ -322,6 +370,23 @@ def save_recipe(recipe_id, name, portions, keeps_days, prep_note, prep_hours, me
                 cur.execute("INSERT INTO meals.recipe_items (recipe_id, ingredient_id, qty, unit) VALUES (%s, %s, %s, %s)",
                             (rid, ing, qty, unit))
             return rid
+    return _run(work)
+
+
+def save_bought_dish(recipe_id, name, count_unit, price, shop, category):
+    """A dish bought ready-made (kenkey, waakye…): no ingredients, a usual price per unit. Returns its id."""
+    def work(conn):
+        with conn.cursor() as cur:
+            fields = (name.strip(), count_unit or "portion", round(float(price), 2) if price else None, shop or None,
+                      category or None)
+            if recipe_id:
+                cur.execute("UPDATE meals.recipes SET name=%s, count_unit=%s, price=%s, shop=%s, category=%s, bought=TRUE "
+                            "WHERE id=%s", fields + (recipe_id,))
+                cur.execute("DELETE FROM meals.recipe_items WHERE recipe_id = %s", (recipe_id,))
+                return recipe_id
+            cur.execute("INSERT INTO meals.recipes (name, count_unit, price, shop, category, bought, portions, keeps_days) "
+                        "VALUES (%s, %s, %s, %s, %s, TRUE, 1, 1) RETURNING id", fields)
+            return cur.fetchone()[0]
     return _run(work)
 
 

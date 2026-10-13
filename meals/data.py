@@ -19,10 +19,12 @@ HOUSEHOLD_KEY = "meals_household"
 QUERIES = {
     "ingredients": "SELECT id, name, unit, category, low_level, pack_name, pack_size, kind FROM meals.ingredients "
                    "ORDER BY lower(name)",
-    "recipes": "SELECT id, name, portions, keeps_days, prep_note, prep_hours, method FROM meals.recipes ORDER BY lower(name)",
+    "recipes": "SELECT id, name, portions, keeps_days, prep_note, prep_hours, method, bought, price, count_unit, shop, "
+               "category FROM meals.recipes ORDER BY lower(name)",
     "items": "SELECT id, recipe_id, ingredient_id, qty, unit FROM meals.recipe_items ORDER BY id",
     # a window around this week is all the screens need
-    "plan": "SELECT id, day, slot, recipe_id, ingredient_id, qty, unit, status, done_at, done_by FROM meals.plan "
+    "plan": "SELECT id, day, slot, recipe_id, ingredient_id, qty, unit, status, done_at, done_by, label, price "
+            "FROM meals.plan "
             "WHERE day BETWEEN CURRENT_DATE - 40 AND CURRENT_DATE + 63 ORDER BY day, id",
     "fridge": "SELECT id, recipe_id, label, portions, cooked_on, eat_by, plan_id, unit FROM meals.fridge "
               "WHERE portions > 0 ORDER BY eat_by, id",
@@ -36,6 +38,9 @@ QUERIES = {
     "history": "SELECT i.ingredient_id, i.unit, i.qty, i.price, t.date, t.shop FROM meals.trip_items i "
                "JOIN meals.trips t ON t.id = i.trip_id WHERE t.date >= CURRENT_DATE - 400 AND i.qty > 0 "
                "AND i.ingredient_id IS NOT NULL ORDER BY t.date",
+    # what was paid for bought food (kenkey, waakye…) on each day, for price trends
+    "bought": "SELECT date, recipe_id, label, qty, unit, paid, shop FROM meals.bought "
+              "WHERE date >= CURRENT_DATE - 400 AND qty > 0 ORDER BY date",
     "waste": "SELECT id, date, label, amount, unit, value, recipe_id FROM meals.waste "
              "WHERE date >= CURRENT_DATE - 400 ORDER BY date DESC, id DESC",
 }
@@ -89,8 +94,14 @@ class Kitchen:
                       if pn and ps is not None and not pd.isna(ps) and float(ps) > 0}
         self.recipes = {int(r["id"]): {"name": r["name"], "portions": float(r["portions"]), "keeps_days": int(r["keeps_days"]),
                                        "prep_note": r["prep_note"], "prep_hours": None if pd.isna(r["prep_hours"])
-                                       else int(r["prep_hours"]), "method": r["method"]}
+                                       else int(r["prep_hours"]), "method": r["method"],
+                                       # bought ready-made: no ingredients, a usual price per unit instead
+                                       "bought": bool(r["bought"]), "price": _f(r["price"]),
+                                       "count_unit": r["count_unit"] or "portion", "shop": r["shop"] or "",
+                                       "category": r["category"] or ""}
                         for _, r in f["recipes"].iterrows()}
+        # what bought food is paid under counts as food too (e.g. Dining Out)
+        self.food_categories |= {r["category"] for r in self.recipes.values() if r["bought"] and r["category"]}
         items = defaultdict(list)
         for _, r in f["items"].iterrows():
             items[int(r["recipe_id"])].append((int(r["ingredient_id"]), float(r["qty"]), r["unit"]))
@@ -99,7 +110,8 @@ class Kitchen:
             {"id": int(r["id"]), "day": r["day"], "slot": r["slot"],
              "recipe_id": None if pd.isna(r["recipe_id"]) else int(r["recipe_id"]),
              "ingredient_id": None if pd.isna(r["ingredient_id"]) else int(r["ingredient_id"]),
-             "qty": float(r["qty"]), "unit": r["unit"], "status": r["status"], "done_by": r["done_by"]}
+             "qty": float(r["qty"]), "unit": r["unit"], "status": r["status"], "done_by": r["done_by"],
+             "label": r["label"], "price": _f(r["price"])}
             for _, r in f["plan"].iterrows()]
         self.fridge = [
             {"id": int(r["id"]), "recipe_id": None if pd.isna(r["recipe_id"]) else int(r["recipe_id"]),
@@ -116,6 +128,7 @@ class Kitchen:
             h = h.assign(per_unit=h["price"].astype(float) / h["qty"].astype(float))
         self.history = h
         self.waste = f["waste"]
+        self.bought_history = f["bought"]
         settings = dict(zip(f["settings"]["key"], f["settings"]["value"]))
         try:
             self.household = max(int(settings.get(HOUSEHOLD_KEY, 4)), 1)
@@ -166,6 +179,8 @@ class Kitchen:
 
     # ---- names ----------------------------------------------------------------
     def entry_name(self, e):
+        if e.get("label") and not e.get("recipe_id") and not e.get("ingredient_id"):
+            return e["label"]
         if e.get("recipe_id"):
             return self.recipes.get(e["recipe_id"], {}).get("name", "Deleted recipe")
         return self.names.get(e.get("ingredient_id"), "Deleted item")
@@ -182,6 +197,19 @@ class Kitchen:
     def week_of(day):
         start = day - timedelta(days=day.weekday())
         return start, start + timedelta(days=6)
+
+    def is_bought(self, e):
+        """Food bought ready-made: a bought dish from the recipe book, or a one-off typed into the plan."""
+        if e.get("recipe_id"):
+            return bool(self.recipes.get(e["recipe_id"], {}).get("bought"))
+        return not e.get("ingredient_id") and bool(e.get("label"))
+
+    def bought_price(self, e):
+        """(price for one unit, unit name) for a bought entry; price may be None if never set."""
+        if e.get("recipe_id"):
+            r = self.recipes.get(e["recipe_id"], {})
+            return (e.get("price") or r.get("price")), r.get("count_unit") or "portion"
+        return e.get("price"), e.get("unit") or "portion"
 
     # ---- fridge ------------------------------------------------------------------
     def fridge_portions(self, recipe_id, today=None):

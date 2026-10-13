@@ -70,6 +70,12 @@ LINES = {
         "The {what} budget has left the chat.",
         "Something has to give, and it shouldn't be the rent.",
     ],
+    "pickup": [
+        "Somebody has to make the run. Rock, paper, scissors?",
+        "The seller won't wait all day.",
+        "Fresh {dish} waits for no one.",
+        "Go early, before the {dish} finishes.",
+    ],
     "supplies_low": [
         "The bleach bottle is giving its last drops.",
         "Clean house, empty cupboard. Time to restock.",

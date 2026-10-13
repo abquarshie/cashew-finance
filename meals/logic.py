@@ -16,10 +16,33 @@ MEAL_HOUR = {"Breakfast": 7, "Lunch": 13, "Supper": 19}
 OPEN = "planned"
 
 
+def is_bought(entry, recipes):
+    """Food bought ready-made (kenkey, waakye…): a bought dish, or a one-off typed into the plan."""
+    if entry.get("recipe_id"):
+        return bool(recipes.get(entry["recipe_id"], {}).get("bought"))
+    return not entry.get("ingredient_id") and bool(entry.get("label"))
+
+
+def bought_cost(entries, recipes):
+    """Expected cost of the bought food among these entries: (total, how many have no price yet)."""
+    total, unknown = 0.0, 0
+    for e in entries:
+        if not is_bought(e, recipes):
+            continue
+        price = e.get("price") or (recipes.get(e.get("recipe_id"), {}) or {}).get("price")
+        if price:
+            total += float(price) * float(e["qty"])
+        else:
+            unknown += 1
+    return round(total, 2), unknown
+
+
 def entry_needs(entry, recipes, items, packs=None):
     """What one plan entry uses: [(ingredient_id, base_unit, qty)]. A recipe is scaled to the portions planned.
     packs: {ingredient_id: (container, size in base unit, base)} so "1 crate" of eggs counts as 30 eggs."""
     packs = packs or {}
+    if is_bought(entry, recipes):  # bought ready-made: nothing comes out of the pantry
+        return []
     if entry.get("recipe_id"):
         r = recipes.get(entry["recipe_id"])
         if not r:
@@ -137,6 +160,9 @@ def allocate(entries, recipes, items, pantry, fridge, household, today, packs=No
     for e in sorted((e for e in entries if e["status"] == OPEN and e["day"] >= today), key=_when):
         rid = e.get("recipe_id")
         recipe = recipes.get(rid) if rid else None
+        if is_bought(e, recipes):
+            meals[_key(e)] = {"status": "bought", "missing": [], "needs": []}
+            continue
         if recipe:
             eat = min(float(household), float(e["qty"]))
             ready = sorted((b for b in boxes if b[0] == rid and b[1] > 1e-9 and b[2] >= e["day"]), key=lambda b: b[2])
@@ -183,7 +209,8 @@ def repeat_plan(plan, today, horizon=14):
             src = by_slot.get((d - timedelta(days=7), slot))
             if src:
                 copies = [{"day": d, "slot": slot, "recipe_id": e.get("recipe_id"), "ingredient_id": e.get("ingredient_id"),
-                           "qty": e["qty"], "unit": e.get("unit")} for e in src]
+                           "qty": e["qty"], "unit": e.get("unit"), "label": e.get("label"), "price": e.get("price")}
+                          for e in src]
                 by_slot[(d, slot)] = copies
                 new += copies
     return new
@@ -442,6 +469,21 @@ def reminders(now, entries, recipes, items, pantry, fridge, names, household, lo
             text = (f"{day_word} {e['slot'].lower()}: {in_fridge[e['recipe_id']]:g} portions of {r['name']} "
                     "are already in the fridge, no need to cook.")
             out.append(("ok", with_joke("leftovers", text, today, e.get("id"), fun, dish=r["name"].lower())))
+
+    # bought food to pick up
+    for e in sorted(open_entries, key=_when):
+        if status.get(_key(e), {}).get("status") != "bought":
+            continue
+        r = recipes.get(e.get("recipe_id")) or {}
+        name = r.get("name") or e.get("label") or "food"
+        unit = r.get("count_unit") or e.get("unit") or "portion"
+        price = e.get("price") or r.get("price")
+        cost = f" (about GH₵{float(price) * float(e['qty']):,.2f})" if price else ""
+        where = f" from {r['shop']}" if r.get("shop") else ""
+        day_word = "today's" if e["day"] == today else "tomorrow's"
+        text = (f"Pick up {frac(e['qty'])} {plural(unit, float(e['qty']))} of {name}{where} for {day_word} "
+                f"{e['slot'].lower()}{cost}.")
+        out.append(("info", with_joke("pickup", text, today, e.get("id"), fun, dish=name.lower())))
 
     # ingredients missing for today's and tomorrow's cooking, after the stock is shared out
     missing = defaultdict(float)

@@ -6,12 +6,13 @@ shows exactly the same thing on Home, on the meal plan and in the preview.
 from datetime import date, timedelta
 from html import escape
 
-from meals.logic import (GUARD_JOKE, OPEN, SLOTS, budget_guard, food_budget, shopping_list, shortfall)
+from meals.logic import (GUARD_JOKE, OPEN, SLOTS, bought_cost, budget_guard, food_budget, shopping_list,
+                          shortfall)
 from meals.quips import with_joke
 from meals.units import base_of, fmt, plural, to_base
 
 ICON = {"warn": "⚠️", "info": "•", "ok": "✅"}
-STATUS_ICON = {"ready": "✅", "leftovers": "🥡", "short": "🛒", "done": "✔️"}
+STATUS_ICON = {"ready": "✅", "leftovers": "🥡", "short": "🛒", "done": "✔️", "bought": "🛍️"}
 
 
 def entry_status(k, e, today):
@@ -23,6 +24,9 @@ def entry_status(k, e, today):
         return "ready", ""
     if m["status"] == "leftovers":
         return "leftovers", "from the fridge"
+    if m["status"] == "bought":
+        price, _ = k.bought_price(e)
+        return "bought", "buy on the day" + (f", about GH₵{float(price) * float(e['qty']):,.0f}" if price else "")
     if m["status"] == "short":
         names = [k.names.get(ing, "?") for ing, _, _ in m["missing"]]
         listed = ", ".join(names[:3]) + (f" +{len(names) - 3}" if len(names) > 3 else "")
@@ -47,7 +51,7 @@ def today_summary(k, now):
         note = notes[0]
     elif not meals:
         note = ("info", with_joke("nothing_planned", "Nothing planned for today yet.", today, "", k.fun))
-    elif all(m[2] in ("ready", "leftovers", "done") for m in meals):
+    elif all(m[2] in ("ready", "leftovers", "done", "bought") for m in meals):
         note = ("ok", with_joke("all_ready", "Everything for today's meals is in.", today, "", k.fun))
     else:
         note = None
@@ -62,7 +66,9 @@ def planned_cost(k, today, until=None):
     end = min(end, until or month_end)
     entries = k.open_entries(start, end)
     items = shopping_list(shortfall(k.allocation(today), entries), {}, prices=k.prices, packs=k.packs)
-    return round(sum(r["est"] or 0 for r in items), 2), sum(1 for r in items if r["est"] is None)
+    bought, bought_unknown = bought_cost(entries, k.recipes)  # kenkey, waakye… paid for on the day
+    return (round(sum(r["est"] or 0 for r in items) + bought, 2),
+            sum(1 for r in items if r["est"] is None) + bought_unknown)
 
 
 def supplies_cost(k):

@@ -63,13 +63,15 @@ def add_to_plan(page, day, slot, recipe, portions=None):
     settle(page, 500)
     chip(page, slot, within=".st-key-card-meal-add").click()
     settle(page, 500)
-    pick(page, "Recipe", recipe)
+    pick(page, "Dishes", recipe)
+    page.keyboard.press("Escape")
+    settle(page, 500)
     if portions:
-        n = page.get_by_role("spinbutton", name="Portions to cook")
+        n = page.get_by_role("spinbutton", name=re.compile(re.escape(recipe)))
         n.fill(str(portions))
         n.press("Enter")
         settle(page)
-    page.locator(".st-key-card-meal-add").get_by_role("button", name="Add to").click()
+    page.locator(".st-key-card-meal-add").get_by_role("button", name=re.compile(r"Add (\d+ )?to ")).click()
     settle(page, 2000)
     no_errors(page)
 
@@ -391,3 +393,71 @@ def test_household_supplies_have_their_own_budget(desktop, app_url, conn):
     desktop.get_by_role("tab", name="Ingredients").click()
     settle(desktop)
     assert "Bleach" not in desktop.inner_text("body"), "supplies never show among food ingredients"
+
+
+def test_several_dishes_and_a_one_off_in_one_go(desktop, app_url, conn):
+    day = date.today() + timedelta(days=5)
+    q(conn, "DELETE FROM meals.plan WHERE day = %s AND slot = 'Lunch'", (day,))
+    sign_in(desktop, app_url, path="meals")
+    chip(desktop, day_chip(day), within=".st-key-card-meal-add").click()
+    settle(desktop, 500)
+    chip(desktop, "Lunch", within=".st-key-card-meal-add").click()
+    settle(desktop, 500)
+    for dish in (REDRED, "Bread, eggs and tea"):
+        pick(desktop, "Dishes", dish)
+    desktop.keyboard.press("Escape")
+    settle(desktop)
+    switch = desktop.locator('[data-testid="stCheckbox"]').filter(has_text="bought outside").locator("label").first
+    box = desktop.get_by_role("textbox", name="What")
+    for _ in range(2):  # the first tap may only close the dishes list
+        if not box.count():
+            switch.click()
+            settle(desktop, 800)
+    box.fill("Fried yam from the roadside")
+    box.press("Enter")
+    settle(desktop)
+    price = desktop.get_by_role("spinbutton", name=re.compile("Price for one"))
+    price.fill("20")
+    price.press("Enter")
+    settle(desktop)
+    desktop.get_by_role("button", name=re.compile("Add 3 to")).click()
+    settle(desktop, 2500)
+    no_errors(desktop)
+    rows = q(conn, "SELECT recipe_id IS NOT NULL, label, price FROM meals.plan WHERE day = %s AND slot = 'Lunch' "
+                   "ORDER BY id", (day,))
+    assert len(rows) == 3, rows
+    assert rows[2][1] == "Fried yam from the roadside" and float(rows[2][2]) == 20
+
+
+def test_bought_food_is_paid_for_when_ticked(desktop, app_url, conn):
+    kenkey = q(conn, "INSERT INTO meals.recipes (name, portions, keeps_days, bought, price, count_unit, shop, category) "
+                     "VALUES ('Kenkey', 1, 1, TRUE, 5, 'ball', 'Auntie Ama', 'Dining Out') RETURNING id")[0][0]
+    q(conn, "DELETE FROM meals.plan WHERE day = CURRENT_DATE AND slot = 'Lunch'")
+    entry = q(conn, "INSERT INTO meals.plan (day, slot, recipe_id, qty) VALUES (CURRENT_DATE, 'Lunch', %s, 6) RETURNING id",
+              (kenkey,))[0][0]
+    sign_in(desktop, app_url, path="meals")
+    body = desktop.inner_text("body")
+    assert "Pick up 6 balls of Kenkey from Auntie Ama for today's lunch (about GH₵30.00)" in body
+    row = desktop.locator(f".st-key-meal-entry-{entry}")
+    assert "🛍️" in row.inner_text()
+    row.get_by_role("button", name="Bought").click()
+    dialog = desktop.locator('[role="dialog"]')
+    dialog.wait_for()
+    paid = dialog.get_by_role("spinbutton", name="Paid (GH₵)")
+    assert paid.input_value() in ("30.00", "30")
+    paid.fill("36")
+    paid.press("Enter")
+    settle(desktop)
+    dialog.get_by_role("button", name="Save").click()
+    settle(desktop, 2500)
+    no_errors(desktop)
+    cat, amount, note = q(conn, "SELECT category, amount, note FROM transactions ORDER BY id DESC LIMIT 1")[0]
+    assert (cat, float(amount)) == ("Dining Out", 36) and "Kenkey" in note, "the payment is an expense"
+    assert float(q(conn, "SELECT price FROM meals.recipes WHERE id = %s", (kenkey,))[0][0]) == 6, "new usual price"
+    assert q(conn, "SELECT status FROM meals.plan WHERE id = %s", (entry,)) == [("bought",)]
+
+    desktop.locator(f".st-key-meal-entry-{entry}").locator("[data-testid=stCheckbox] label").click()  # untick
+    settle(desktop, 2500)
+    assert q(conn, "SELECT count(*) FROM transactions WHERE note LIKE 'Bought: Kenkey%%'")[0][0] == 0, \
+        "unticking takes the payment back out"
+    assert float(q(conn, "SELECT price FROM meals.recipes WHERE id = %s", (kenkey,))[0][0]) == 5

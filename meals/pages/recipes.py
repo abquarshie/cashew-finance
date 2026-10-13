@@ -35,6 +35,13 @@ def _line(k, ing, qty, unit):
 
 def _recipe_card(k, rid):
     r = k.recipes[rid]
+    if r["bought"]:
+        price = f"{money(r['price'])} a {r['count_unit']}" if r["price"] else "price known after the first time"
+        where = f"Bought at {r['shop']}" if r["shop"] else "Bought ready-made"
+        return (f'<div class="rule"><div style="min-width:0"><div class="rule-name">{esc(r["name"])}'
+                f'{pill("🛍️ bought", "accent")}</div><div class="rule-meta">{esc(where)}'
+                f'{", logged under " + esc(r["category"]) if r["category"] else ""}</div></div>'
+                f'<div class="rule-right"><div class="rule-next">{esc(price)}</div></div></div>')
     lines = k.items.get(rid, [])
     cost_txt = cost_text(k, rid)
     ings = ", ".join(_line(k, i, q, u) for i, q, u in lines)
@@ -44,6 +51,47 @@ def _recipe_card(k, rid):
             f'{pill(frac(r["portions"]) + " " + plural("portion", r["portions"]), "neutral")}{pill("keeps " + str(r["keeps_days"]) + " days", "accent")}'
             f'</div><div class="rule-meta">{esc(ings) or "No ingredients yet"}</div>{prep}</div>'
             f'<div class="rule-right"><div class="rule-next">{esc(cost_txt)}</div></div></div>')
+
+
+BOUGHT_UNITS = ["ball", "portion", "piece", "pack", "plate", "bowl", "loaf", "bottle", "sachet"]
+
+
+def _bought_editor(k, rid, r, pre, ver):
+    """A dish bought ready-made: its unit, usual price, where from, and the money category it's paid under."""
+    from core.data import book as money_book
+    ss = st.session_state
+    b = money_book()
+    name = st.text_input("Name", value=r["name"], key=pre + "bname", max_chars=80, placeholder="e.g. Kenkey").strip()
+    c1, c2 = st.columns(2)
+    unit_now = r.get("count_unit") or "ball"
+    units = list(dict.fromkeys([unit_now] + BOUGHT_UNITS))
+    unit = c1.selectbox("Counted in", units, key=pre + "bunit")
+    price = c2.number_input(f"Usual price for one {unit} (GH₵)", min_value=0.0, step=0.5, format="%.2f",
+                            value=float(r["price"]) if r.get("price") else None, key=pre + "bprice",
+                            help="Updated each time you tick it off with what you actually paid.")
+    shop = st.text_input("Where you buy it (optional)", value=r.get("shop") or "", key=pre + "bshop", max_chars=60,
+                         placeholder="e.g. Auntie Ama, Dansoman").strip()
+    cats = b.category_names("Expense")
+    default = r.get("category") or ("Dining Out" if "Dining Out" in cats else (cats[0] if cats else None))
+    cat = st.selectbox("Paid under", cats, index=cats.index(default) if default in cats else 0, key=pre + "bcat")
+    taken = {v["name"].lower() for i, v in k.recipes.items() if i != rid}
+    clash = name.lower() in taken
+    if clash:
+        field_msg("You already have a dish with this name.")
+    row = st.container(horizontal=True)
+    if row.button("Save", type="primary", disabled=not name or clash, icon=":material/check:", key=pre + "bsave"):
+        new_id = actions.save_bought_dish(rid or None, name, unit, price, shop, cat)
+        ss[f"meal_recipe_ver_{rid}"] = ver + 1
+        ss["_meal_recipe_next"] = new_id
+        flash(f"Saved {name}", ":material/shopping_bag:")
+        st.rerun()
+    if rid and row.button("Delete", icon=":material/delete:", key=pre + "bdel"):
+        def _after():
+            st.session_state["_meal_recipe_next"] = NEW
+            invalidate_kitchen()
+        confirm(f"Delete **{r['name']}**? It comes off any days it's planned for that haven't been bought yet.",
+                [("DELETE FROM meals.plan WHERE recipe_id = %s AND status = 'planned'", (rid,)),
+                 ("DELETE FROM meals.recipes WHERE id = %s", (rid,))], f"Deleted {r['name']}", after=_after)
 
 
 def _editor(k):
@@ -60,6 +108,11 @@ def _editor(k):
     ver = ss.get(f"meal_recipe_ver_{rid}", 0)
     pre = f"meal_r{rid}_{ver}_"
 
+    bought = st.toggle("Bought outside, ready-made", value=bool(r.get("bought")), key=pre + "bought",
+                       help="Kenkey, waakye, bread from the corner… No ingredients: you pay for it on the day.")
+    if bought:
+        _bought_editor(k, rid, r, pre, ver)
+        return
     name = st.text_input("Name", value=r["name"], key=pre + "name", max_chars=80,
                          placeholder="e.g. Groundnut soup").strip()
     c1, c2 = st.columns(2)

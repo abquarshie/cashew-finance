@@ -130,6 +130,30 @@ def _table(k, rows, sig, cats):
     return lines, missing
 
 
+# ---- bought food: picked up on the day, not from the market list -------------------------------------
+def _pickups(k, entries):
+    with card("meal-pickups"):
+        total, unknown = 0.0, 0
+        rows = []
+        for e in sorted(entries, key=lambda e: (e["day"], SLOT_ORDER.get(e["slot"], 9))):
+            price, unit = k.bought_price(e)
+            r = k.recipes.get(e.get("recipe_id")) or {}
+            cost = float(price) * float(e["qty"]) if price else None
+            total += cost or 0
+            unknown += cost is None
+            where = f" · {r['shop']}" if r.get("shop") else ""
+            rows.append(f'<div class="prog-head"><span>{e["day"]:%a} {esc(e["slot"].lower())}: '
+                        f'{esc(k.entry_name(e))}, {frac(e["qty"])} {esc(plural(unit, e["qty"]))}{esc(where)}</span>'
+                        f'<b class="num">{money(cost) if cost is not None else "?"}</b></div>')
+        section("Pick up on the day", f"about {money(total)}" + (f" + {unknown} unpriced" if unknown else ""))
+        st.html("".join(rows))
+        st.caption("Bought ready-made, so not on the market list. Tap Bought on the meal plan when you pay; "
+                   "it's saved as an expense.")
+
+
+SLOT_ORDER = {"Breakfast": 0, "Lunch": 1, "Supper": 2}
+
+
 # ---- prices: what things cost, and where it's cheaper ------------------------------------------------
 # reference categorical slots 1-4 (validated for colour blindness), stepped separately for each theme
 TREND_COLORS = {"light": ["#2a78d6", "#eb6834", "#1baf7a", "#eda100"],
@@ -157,6 +181,13 @@ def _trend(k):
         scale, per = _scale(k, int(ing), base)
         name = f"{k.names.get(int(ing), '?')} (per {per})"
         series[name] = (g.groupby("month")["per_unit"].mean() * scale, len(g))
+    bh = k.bought_history
+    if len(bh):  # bought food: price per ball, per pack…
+        bh = bh.assign(month=pd.to_datetime(bh["date"]).dt.to_period("M"),
+                       each=bh["paid"].astype(float) / bh["qty"].astype(float))
+        for (label, unit), g in bh.groupby(["label", "unit"]):
+            if g["month"].nunique() >= 2:
+                series[f"{label} (per {unit})"] = (g.groupby("month")["each"].mean(), len(g))
     if not series:
         st.caption("Price trends appear once you've bought the same item in two different months.")
         return
@@ -240,6 +271,7 @@ def render():
     rows = _rows(k, items, extras, cats, fallback)
     sig = abs(hash((scope, tuple((r["ing"], r["amount"], r["unit"]) for r in rows), ss.get("meal_shop_ver", 0))))
 
+    pickups = [e for e in entries if k.is_bought(e)]
     left, right = st.columns([3, 2], gap="medium")
     with left:
         with card("meal-shop-list"):
@@ -271,6 +303,8 @@ def render():
                     st.code(text, language=None)
                     st.caption("Tap the copy icon, then paste into a note or any other app.")
 
+        if pickups:
+            _pickups(k, pickups)
     with right:
         with card("meal-shop-save"):
             section("Save the shopping trip")

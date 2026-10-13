@@ -124,6 +124,7 @@ div.st-key-card-savebar { position: sticky; bottom: 14px; z-index: 20; border-co
   background: var(--accent-soft); }
 .today-note.warn { background: var(--warn-soft); }
 .today-also { color: var(--muted); font-size: .8rem; line-height: 1.45; padding: .4rem 0 0; border-top: 1px solid var(--line); }
+.bought-row { font-size: .95rem; line-height: 1.4; padding: .35rem 0; min-width: 0; }
 .week-head { color: var(--muted); font-size: .8rem; font-weight: 700; margin: .2rem 0 .1rem; }
 div[class*="st-key-add_open_"] button { min-height: 3rem; font-size: 1.02rem; border-radius: 14px; }
 

@@ -368,6 +368,27 @@ def test_household_budget_words():
     assert "food" not in joke("budget_75", D, "household", what="household")
 
 
+def test_bought_food_needs_no_ingredients():
+    from datetime import datetime
+    recipes = dict(RECIPES)
+    recipes[3] = {"name": "Kenkey", "portions": 1, "keeps_days": 1, "prep_note": None, "prep_hours": None,
+                  "bought": True, "price": 5.0, "count_unit": "ball", "shop": "Auntie Ama"}
+    e = plan({"id": 1, "day": D, "slot": "Supper", "recipe_id": 3, "qty": 6},
+             {"id": 2, "day": D, "slot": "Supper", "label": "Fried fish", "qty": 2, "unit": "piece", "price": 15.0},
+             {"id": 3, "day": D, "slot": "Supper", "recipe_id": 1, "qty": 4})
+    alloc = ml.allocate(e, recipes, ITEMS, {}, [], 4, D)
+    assert alloc["meals"][1]["status"] == alloc["meals"][2]["status"] == "bought"
+    assert alloc["meals"][3]["status"] == "short", "the home-cooked dish in the same meal still needs shopping"
+    assert ml.bought_cost(e, recipes) == (60.0, 0), "6 kenkey at 5 + 2 fish at 15"
+    assert set(ml.shortfall(alloc, e)) == {(10, "pcs"), (11, "g")}, "only jollof's ingredients go on the list"
+    notes = " | ".join(t for _, t in ml.reminders(datetime(2026, 10, 12, 8, 0), e, recipes, ITEMS, {}, [], {}, 4))
+    assert "Pick up 6 balls of Kenkey from Auntie Ama for today's supper (about GH₵30.00)" in notes
+    assert "Pick up 2 pieces of Fried fish for today's supper (about GH₵30.00)" in notes
+    copied = ml.repeat_plan(e, D + timedelta(days=7))
+    fish = [c for c in copied if c.get("label") == "Fried fish"]
+    assert len(copied) == 6 and fish and fish[0]["price"] == 15.0, "the whole meal repeats (both weeks), one-offs with their price"
+
+
 def test_budget_guard_looks_ahead():
     assert ml.budget_guard(1000, 500, 100) is None, "60% is fine"
     assert ml.budget_guard(1000, 600, 200)["level"] == "75"
