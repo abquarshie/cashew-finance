@@ -10,7 +10,7 @@ from meals import actions
 from meals.data import kitchen
 from meals.briefing import guard
 from meals.logic import shopping_list, shortfall
-from meals.units import base_of, units_for, fmt, frac, from_base, plural, to_base
+from meals.units import base_of, fmt, frac, from_base, loose, plural, to_base, units_for
 from ui.components import card, empty, esc, field_msg, flash, page_header, section
 from ui.entry import _budget_alerts
 
@@ -37,7 +37,7 @@ def _amount(k, r):
 def _qty_label(amount, unit):
     if unit in ("pcs",):
         return frac(amount)
-    if unit in ("g", "kg", "ml", "l"):
+    if unit in ("g", "kg", "ml", "l", "tbsp", "tsp"):
         return f"{amount:g} {unit}"
     return f"{frac(amount)} {plural(unit, amount)}"
 
@@ -49,10 +49,11 @@ def _rows(k, items, extras, cats, fallback):
         why = r["reason"]
         if r["ingredient_id"] in k.supplies:
             why = "Household · " + (why or "running low")
+        usual = k.unit_of.get(r["ingredient_id"])
         if r["pack"]:
-            why += f"{'; ' if why else ''}need {fmt(r['to_buy'], r['base'])}"
+            why += f"{'; ' if why else ''}need {fmt(r['to_buy'], r['base'], usual)}"
         if r["have"] > 0:
-            why += f" (have {fmt(r['have'], r['base'])})"
+            why += f" (have {fmt(r['have'], r['base'], usual)})"
         cat = k.category_of.get(r["ingredient_id"])
         rows.append({"ing": r["ingredient_id"], "name": k.names.get(r["ingredient_id"], "?"), "amount": amount,
                      "unit": unit, "est": r["est"], "category": cat if cat in cats else fallback, "why": why})
@@ -163,7 +164,7 @@ TREND_COLORS = {"light": ["#2a78d6", "#eb6834", "#1baf7a", "#eda100"],
 def _scale(k, ing, base):
     """Prices are stored per gram / ml / piece; show them per bag, per kg, per crate…"""
     pack = k.pack(ing)
-    if pack and pack[2] == base:
+    if pack and pack[2] == base and not loose(pack):
         return pack[1], pack[0]
     usual = k.unit_of.get(ing, base)
     return to_base(1, usual)[0], usual
@@ -264,7 +265,7 @@ def render():
     start, end = _range(scope, today)
     entries = k.open_entries(start, end)
     # the stock is shared out across all the next two weeks' meals in order, so this list is only what's missing
-    needs = shortfall(k.allocation(today), entries, names_for_entry=lambda e: f"{k.entry_name(e)} ({e['day']:%a})")
+    needs = shortfall(k.allocation(today), entries, names_for_entry=lambda e: f"{k.meal_name_of(e)} ({e['day']:%a})")
     items = shopping_list(needs, k.pantry, k.low_levels, k.prices, k.packs)
     items.sort(key=lambda r: (r["low"], k.names.get(r["ingredient_id"], "").lower()))
     extras = ss.setdefault("meal_extra", [])
@@ -275,7 +276,7 @@ def render():
     left, right = st.columns([3, 2], gap="medium")
     with left:
         with card("meal-shop-list"):
-            planned = len(entries)
+            planned = k.meal_count(entries)
             section("To buy")
             for kind in ("food", "household"):
                 g = guard(k, b, today, kind)

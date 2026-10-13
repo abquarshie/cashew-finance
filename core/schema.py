@@ -130,14 +130,44 @@ TABLES = [
     "ALTER TABLE accounts ALTER COLUMN spendable SET DEFAULT TRUE",
     # speeds up the newest-first listing as the history grows
     "CREATE INDEX IF NOT EXISTS transactions_date_idx ON transactions (date DESC, id DESC)",
+    # the double-entry check looks for the same category and amount
+    "CREATE INDEX IF NOT EXISTS transactions_cat_amount_idx ON transactions (category, amount)",
 ]
 
 
+def _version():
+    """A fingerprint of every table definition and the starting data. When the database already carries it,
+    there's nothing to create or upgrade, so starting up costs one quick query instead of dozens."""
+    import hashlib
+
+    from meals.catalog import FLAG
+    from meals.schema import TABLES as MEAL_TABLES
+    text = "\n".join(TABLES + MEAL_TABLES + [FLAG, repr(SEED_CATEGORIES), repr(SEED_ACCOUNTS)])
+    return hashlib.sha1(text.encode()).hexdigest()[:16]
+
+
+SCHEMA_KEY = "schema_version"
+
+
 def ensure_schema(conn):
-    """Create or upgrade every table, and add the starting categories once. Safe to run every time."""
+    """Create or upgrade every table, and add the starting categories and kitchen catalog once.
+    Safe to run every time; when the database is already up to date it only reads one value."""
+    from meals.catalog import seed as seed_kitchen
     from meals.schema import ensure_meals_schema
 
+    version = _version()
     cur = conn.cursor()
+    try:
+        cur.execute("SELECT value FROM app_meta WHERE key = %s", (SCHEMA_KEY,))
+        row = cur.fetchone()
+    except Exception:  # a brand-new database has no app_meta table yet
+        conn.rollback()
+        cur = conn.cursor()
+        row = None
+    if row and row[0] == version:
+        conn.commit()
+        cur.close()
+        return
     for sql in TABLES:
         cur.execute(sql)
     ensure_meals_schema(cur)
@@ -153,5 +183,8 @@ def ensure_schema(conn):
             cur.execute("INSERT INTO accounts (name, spendable) VALUES (%s, NOT (%s ~* %s)) ON CONFLICT (name) DO NOTHING",
                         (acct, acct, SAVINGS_WORDS))
         cur.execute("INSERT INTO app_meta (key, value) VALUES ('seeded_v2', 'yes')")
+    seed_kitchen(cur)
+    cur.execute("INSERT INTO app_meta (key, value) VALUES (%s, %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+                (SCHEMA_KEY, version))
     conn.commit()
     cur.close()

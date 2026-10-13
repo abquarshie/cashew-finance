@@ -7,7 +7,7 @@ from core.data import money
 from meals import actions
 from meals.data import kitchen
 from meals.logic import fridge_flags, recipe_cost
-from meals.units import LEFTOVER_UNITS, base_of, fmt, frac, fmt_stock, from_base, plural, to_base
+from meals.units import LEFTOVER_UNITS, base_of, fmt, fmt_stock, frac, from_base, loose, plural, to_base
 from ui.components import card, empty, esc, field_msg, flash, page_header, pill, section
 
 FLAG = {"past": ("Past eat-by", "out"), "soon": ("Eat soon", "warn"), "low": ("Running low", "warn"),
@@ -91,14 +91,17 @@ def _pantry(k):
         unit = usual if base_of(usual) == base else base
         have = k.pantry.get((ing, base), 0.0)
         low = k.low_levels.get((ing, base))
-        status = "Out" if have <= 0 else ("Low" if low is not None and have <= low else "")
+        # an item only counts as "out" once it has been stocked or has a warning level: the catalog's many
+        # never-bought items aren't all "out"
+        tracked = (ing, base) in k.pantry or low is not None
+        status = ("Out" if tracked else "") if have <= 0 else ("Low" if low is not None and have <= low else "")
         per = k.prices.get((ing, base))
         rows.append({"Item": k.names.get(ing, "?"), "In stock": round(from_base(have, base, unit), 3), "Unit": unit,
-                     "On the shelf": fmt_stock(have, base, k.pack(ing)) if have > 0 else "",
+                     "On the shelf": fmt_stock(have, base, k.pack(ing), usual) if have > 0 else "",
                      "Status": status,
-                     "Warn at": fmt(low, base) if low is not None else "",
+                     "Warn at": fmt(low, base, usual) if low is not None else "",
                      "Last price": (f"{money(per * k.pack(ing)[1])} / {k.pack(ing)[0]}" if per and k.pack(ing)
-                                    and k.pack(ing)[2] == base else
+                                    and k.pack(ing)[2] == base and not loose(k.pack(ing)) else
                                     f"{money(per * to_base(1, unit)[0])} / {unit}" if per else ""),
                      "_ing": ing, "_base": base})
     table = pd.DataFrame(rows)

@@ -180,9 +180,40 @@ TABLES += [
     """,
 ]
 
+TABLES += [
+    # the Ghanaian kitchen catalog: which shelf an item sits on, whether it's sold loose even though it also
+    # comes in a container (onions by the piece, not the 40-onion bag), and other units it's measured in
+    # ({"container": 400} for an 80 tsp spice container; {"tbsp": 15} for margarine by the spoon), in base units
+    "ALTER TABLE meals.ingredients ADD COLUMN IF NOT EXISTS section VARCHAR(40)",
+    "ALTER TABLE meals.ingredients ADD COLUMN IF NOT EXISTS loose BOOLEAN NOT NULL DEFAULT FALSE",
+    "ALTER TABLE meals.ingredients ADD COLUMN IF NOT EXISTS alt_units JSONB",
+    # what part a dish plays in a meal: a starch (kokonte, fufu, banku…) eaten with a soup or stew
+    "ALTER TABLE meals.recipes ADD COLUMN IF NOT EXISTS role VARCHAR(10) NOT NULL DEFAULT 'main'",
+    # ready-made pairings for the planner, e.g. "Kokonte + Palm nut soup"
+    """
+    CREATE TABLE IF NOT EXISTS meals.pairings (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(120) UNIQUE NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS meals.pairing_items (
+        id SERIAL PRIMARY KEY,
+        pairing_id INTEGER NOT NULL REFERENCES meals.pairings(id) ON DELETE CASCADE,
+        recipe_id INTEGER REFERENCES meals.recipes(id) ON DELETE CASCADE,
+        ingredient_id INTEGER REFERENCES meals.ingredients(id) ON DELETE CASCADE,  -- a side like gari
+        qty NUMERIC(12, 3),                            -- for a side item: how much per person
+        unit VARCHAR(12),
+        CHECK (recipe_id IS NOT NULL OR ingredient_id IS NOT NULL)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS plan_day_slot_idx ON meals.plan (day, slot)",
+]
+
 # Backup and restore order (parents before children).
-BACKUP_TABLES = ["meals.ingredients", "meals.recipes", "meals.recipe_items", "meals.plan", "meals.fridge",
-                 "meals.pantry", "meals.prices", "meals.trips", "meals.trip_items", "meals.waste", "meals.bought"]
+BACKUP_TABLES = ["meals.ingredients", "meals.recipes", "meals.recipe_items", "meals.pairings", "meals.pairing_items",
+                 "meals.plan", "meals.fridge", "meals.pantry", "meals.prices", "meals.trips", "meals.trip_items",
+                 "meals.waste", "meals.bought"]
 
 
 def ensure_meals_schema(cur):

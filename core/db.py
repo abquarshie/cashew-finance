@@ -4,6 +4,9 @@ Connections are kept open in a small pool and reused, instead of opening a new
 one for every query (each new connection costs several round trips to the
 database server, which is most of the wait on a slow link). Reads go through the
 cached loaders in core/data.py; every write clears that cache.
+
+Reads run in autocommit mode: a transaction costs a BEGIN and a COMMIT, each its
+own round trip, so a single read inside one took three trips instead of one.
 """
 import pandas as pd
 import psycopg2
@@ -23,8 +26,9 @@ def _pool(dsn):
     )
 
 
-def transact(fn):
+def transact(fn, read_only=False):
     """Run fn(conn) as one transaction on a pooled connection and return its result.
+    read_only=True skips the transaction (and its two extra round trips) for plain reads.
 
     Hosted databases close connections that sit idle; if the pooled one has gone
     stale, it is thrown away and the work is tried once more on a fresh one.
@@ -34,6 +38,13 @@ def transact(fn):
         conn = pool.getconn()
         broken = False
         try:
+            if read_only:
+                conn.autocommit = True
+                try:
+                    return fn(conn)
+                finally:
+                    if not conn.closed:
+                        conn.autocommit = False
             result = fn(conn)
             conn.commit()
             return result
@@ -57,7 +68,7 @@ def query(sql, params=None):
         with conn.cursor() as cur:
             cur.execute(sql, params)
             return pd.DataFrame(cur.fetchall(), columns=[c[0] for c in cur.description])
-    return transact(work)
+    return transact(work, read_only=True)
 
 
 def fetch_one(sql, params=None):
@@ -65,7 +76,7 @@ def fetch_one(sql, params=None):
         with conn.cursor() as cur:
             cur.execute(sql, params)
             return cur.fetchone()
-    return transact(work)
+    return transact(work, read_only=True)
 
 
 def run_many(statements, refresh=True):

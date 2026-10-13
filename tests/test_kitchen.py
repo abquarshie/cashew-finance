@@ -55,7 +55,7 @@ def day_chip(day):
     return "Today" if day == today else ("Tomorrow" if day == today + timedelta(days=1) else f"{day:%a %d}")
 
 
-def add_to_plan(page, day, slot, recipe, portions=None):
+def add_to_plan(page, day, slot, recipe, portions=None, button=r"Add (\d+ )?to "):
     if (day - date.today()).days >= 7:
         chip(page, "Days 8 to 14", within=".st-key-card-meal-add").click()
         settle(page, 600)
@@ -66,12 +66,16 @@ def add_to_plan(page, day, slot, recipe, portions=None):
     pick(page, "Dishes", recipe)
     page.keyboard.press("Escape")
     settle(page, 500)
+    page.locator(".st-key-card-meal-add .section-title").click()  # close the list: a click on Add while it's
+    settle(page, 500)                                               # open would only close it
     if portions:
         n = page.get_by_role("spinbutton", name=re.compile(re.escape(recipe)))
         n.fill(str(portions))
         n.press("Enter")
         settle(page)
-    page.locator(".st-key-card-meal-add").get_by_role("button", name=re.compile(r"Add (\d+ )?to ")).click()
+    btn = page.locator(".st-key-card-meal-add").get_by_role("button", name=re.compile(button))
+    btn.wait_for(state="visible")  # the form has caught up with what was picked
+    btn.click()
     settle(page, 2000)
     no_errors(page)
 
@@ -86,7 +90,11 @@ def test_starter_recipes(desktop, app_url, conn):
     desktop.get_by_role("button", name="Add starter recipes").click()
     settle(desktop, 2500)
     no_errors(desktop)
-    assert q(conn, "SELECT count(*) FROM meals.recipes")[0][0] == 6
+    from meals.starter import RECIPES
+    names = [r[0] for r in RECIPES]
+    assert q(conn, "SELECT count(*) FROM meals.recipes WHERE name = ANY(%s)", (names,))[0][0] == 6
+    assert not q(conn, "SELECT lower(name) FROM meals.ingredients GROUP BY 1 HAVING count(*) > 1"), \
+        "the starter reuses the catalog's onions, eggs, ginger…"
     body = desktop.inner_text("body")
     assert JOLLOF in body and "keeps 3 days" in body
     # each ingredient points at one of the family's money categories
@@ -131,7 +139,7 @@ def test_plan_and_shopping_totals(desktop, app_url, conn):
     assert "- Rice: 1 bag" in share, share          # 750 g needed; rice comes in 5 kg bags
     assert "- Black-eyed beans: 1 bag" in share, share  # 500 g doubled = 1 kg = one 1 kg bag
     assert "- Palm oil: 1 bottle" in share, share   # 150 ml doubled = 300 ml; sold in 1 l bottles
-    assert "- Garlic: 3" in share, share            # loose items stay as counted
+    assert "- Garlic: 1 bulb" in share, share       # 3 cloves; garlic comes by the bulb of 6
 
 
 def test_shopping_trip_becomes_expenses(desktop, app_url, conn):
@@ -461,3 +469,40 @@ def test_bought_food_is_paid_for_when_ticked(desktop, app_url, conn):
     assert q(conn, "SELECT count(*) FROM transactions WHERE note LIKE 'Bought: Kenkey%%'")[0][0] == 0, \
         "unticking takes the payment back out"
     assert float(q(conn, "SELECT price FROM meals.recipes WHERE id = %s", (kenkey,))[0][0]) == 5
+
+
+def test_a_pairing_is_one_meal_and_the_soup_lasts(desktop, app_url, conn):
+    """Kokonte + Palm nut soup: planned as one meal, the first day cooks the whole pot, the next day's soup
+    comes from the fridge, and one tick does it all."""
+    d1, d2 = date.today() + timedelta(days=4), date.today() + timedelta(days=5)
+    q(conn, "DELETE FROM meals.plan WHERE day IN (%s, %s) AND slot = 'Lunch'", (d1, d2))
+    sign_in(desktop, app_url, path="meals")
+    add_to_plan(desktop, d1, "Lunch", "Kokonte + Palm", button=r"Add 2 to")
+    add_to_plan(desktop, d2, "Lunch", "Kokonte + Palm", button=r"Add 2 to")
+    rows = lambda d: dict(q(conn, "SELECT r.name, p.qty FROM meals.plan p JOIN meals.recipes r ON r.id = p.recipe_id "  # noqa: E731
+                                  "WHERE p.day = %s AND p.slot = 'Lunch'", (d,)))
+    assert {n: float(v) for n, v in rows(d1).items()} == {"Kokonte": 4, "Palm nut soup": 14}, "kokonte for 4, a full pot"
+    assert {n: float(v) for n, v in rows(d2).items()} == {"Kokonte": 4, "Palm nut soup": 4}, "next day: just enough"
+
+    open_app(desktop, app_url, "meals")
+    show_day(desktop, d1)
+    meal = desktop.locator(f".st-key-meal-combo-{d1:%Y%m%d}-Lunch")
+    assert "Kokonte + Palm nut soup" in meal.inner_text(), "one line for the meal"
+    meal.locator("[data-testid=stCheckbox] label").first.click()
+    settle(desktop, 2500)
+    no_errors(desktop)
+    soup = recipe_id(conn, "Palm nut soup")
+    assert {s for (s,) in q(conn, "SELECT status FROM meals.plan WHERE day = %s AND slot = 'Lunch'", (d1,))} == {"cooked"}
+    left = lambda: float(q(conn, "SELECT coalesce(sum(portions), 0) FROM meals.fridge WHERE recipe_id = %s", (soup,))[0][0])  # noqa: E731
+    assert left() == 10, "14 cooked, 4 eaten"
+
+    open_app(desktop, app_url, "meals")
+    show_day(desktop, d2)
+    desktop.locator(f".st-key-meal-combo-{d2:%Y%m%d}-Lunch").locator("[data-testid=stCheckbox] label").first.click()
+    settle(desktop, 2500)
+    no_errors(desktop)
+    got = dict(q(conn, "SELECT r.name, p.status FROM meals.plan p JOIN meals.recipes r ON r.id = p.recipe_id "
+                       "WHERE p.day = %s AND p.slot = 'Lunch'", (d2,)))
+    assert got == {"Kokonte": "cooked", "Palm nut soup": "from_fridge"}, got
+    assert left() == 6, "the soup came out of the fridge"
+    assert "Ticked off" in toasts(desktop)

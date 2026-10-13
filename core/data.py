@@ -23,12 +23,14 @@ AUTO_PREFIX = "Auto · "
 FEE_PREFIX = "Fee · "
 TTL = int(os.environ.get("CASHEW_CACHE_SECONDS", "60"))  # tests shorten this
 
+TX_COLS = ["id", "date", "type", "category", "amount", "note", "member", "account", "to_account", "created_by"]
 TX_SQL = ("SELECT id, date, type, category, amount, note, member, account, to_account, created_by "
           "FROM transactions ORDER BY date DESC, id DESC")
 
-# The smaller tables, each as (columns, query). They all come back together in ONE round trip
+# Every table, each as (columns, query). They all come back together in ONE round trip
 # (as JSON), instead of one trip per table: on a distant database each trip costs ~0.1-0.2 s.
 SMALL = {
+    "tx": (TX_COLS, TX_SQL),
     "budgets": (["category", "monthly_limit"], "SELECT category, monthly_limit FROM budgets ORDER BY category"),
     "cats": (["name", "group_name", "kind"], "SELECT name, group_name, kind FROM categories ORDER BY id"),
     "accts": (["name", "opening_balance", "spendable"],
@@ -63,8 +65,6 @@ def _as_dates(df, cols):
 def _load_frames(conn):
     out = {}
     with conn.cursor() as cur:
-        cur.execute(TX_SQL)
-        out["tx"] = pd.DataFrame(cur.fetchall(), columns=[c[0] for c in cur.description])
         cur.execute(SMALL_SQL)
         row = cur.fetchone()
     for (name, (cols, _)), records in zip(SMALL.items(), row):
@@ -76,7 +76,7 @@ def _load_frames(conn):
 @st.cache_resource(ttl=TTL, show_spinner=False)
 def load_book():
     """All data, from one database round of queries on one connection."""
-    return Book(transact(_load_frames))
+    return Book(transact(_load_frames, read_only=True))
 
 
 def book():

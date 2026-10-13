@@ -89,9 +89,10 @@ def _kitchen(book, k, period, spent):
     house = float(spent[spent["category"].isin(supplies)]["amount"].sum()) if len(spent) and supplies else 0.0
     if house > 0:
         lines.append(escape(f"🧽 Household supplies: {gh(house)}."))
-    cooked = [e for e in k.plan if pd.Period(e["day"], "M") == period and e["status"] != "planned"]
+    # a meal of several dishes (kokonte + palm nut soup) counts once
+    cooked = {(e["day"], e["slot"]) for e in k.plan if pd.Period(e["day"], "M") == period and e["status"] != "planned"}
     if cooked:
-        lines.append(escape(f"🍳 {len(cooked)} planned meals ticked off."))
+        lines.append(escape(f"🍳 {len(cooked)} planned meal{'s' if len(cooked) != 1 else ''} ticked off."))
     w = k.waste
     if len(w):
         w = w[pd.to_datetime(w["date"]).dt.to_period("M") == period]

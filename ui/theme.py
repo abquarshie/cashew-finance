@@ -141,6 +141,8 @@ div[class*="st-key-meal-mk-"] [data-testid="stCheckbox"] label p { font-size: 1r
 .mk-why { color: var(--muted); font-size: .76rem; margin: -.55rem 0 0 1.85rem; }
 .week-cost b { font-weight: 750; }
 .meal-slot { color: var(--muted); font-size: .74rem; font-weight: 700; margin: .55rem 0 -.2rem; }
+.meal-parts { color: var(--muted); font-size: .76rem; line-height: 1.4; margin: -.35rem 0 .2rem 1.85rem; }
+div[class*="st-key-meal-combo-"] { gap: .25rem !important; padding: .15rem 0; }
 div[class*="st-key-meal-entry-"] { gap: .25rem !important; border-bottom: 1px solid var(--line); padding: .15rem 0; }
 div[class*="st-key-meal-entry-"]:last-child { border-bottom: none; }
 div[class*="st-key-meal-fr-"] { border-bottom: 1px solid var(--line); padding: .45rem 0; gap: .5rem !important; }

@@ -9,9 +9,13 @@ Everything works on plain data:
 from collections import defaultdict
 from datetime import datetime, timedelta
 
-from meals.units import fmt, frac, packs_for, plural, to_base
+from meals.units import fmt, frac, loose, packs_for, plural, to_base
 
 SLOTS = ["Breakfast", "Lunch", "Supper"]
+# what part a dish plays in a meal; a meal's name puts the starch first: "Banku + Okra soup"
+ROLES = {"starch": "Starch (kokonte, fufu, banku, rice, yam…)", "soup": "Soup", "stew": "Stew",
+         "sauce": "Sauce", "main": "Complete dish", "side": "Side"}
+ROLE_ORDER = {"starch": 0, "soup": 1, "stew": 1, "sauce": 1, "main": 2, "side": 3}
 MEAL_HOUR = {"Breakfast": 7, "Lunch": 13, "Supper": 19}
 OPEN = "planned"
 
@@ -117,7 +121,7 @@ def shopping_list(needs, pantry, low_levels=None, prices=None, packs=None):
                         "reason": "Running low", "low": True})
     for r in out:
         pack = packs.get(r["ingredient_id"])
-        if pack and pack[2] == r["base"] and pack[1]:
+        if pack and pack[2] == r["base"] and pack[1] and not loose(pack):  # onions are bought by the piece
             r["packs"], r["pack"] = packs_for(r["to_buy"], pack), pack[0]
             r["buy_qty"] = r["packs"] * float(pack[1])   # what you'll actually bring home
         else:
@@ -426,12 +430,13 @@ def meal_time(day, slot):
 
 
 def reminders(now, entries, recipes, items, pantry, fridge, names, household, low_portions=1, packs=None,
-              alloc=None, fun=False, low_levels=None):
+              alloc=None, fun=False, low_levels=None, usual=None):
     """Things that affect cooking in the next day or so, most urgent first.
 
     entries: plan entries for today and tomorrow. fridge: batches with recipe_id, label, portions, eat_by.
     names: {ingredient_id: name}. alloc: allocate()'s result, if already worked out.
     fun: put a joke in front of each reminder (see quips.py). low_levels: {(ing, base): warn level}.
+    usual: {ingredient_id: its own unit}, so rice counted in cups is listed as "3 cups", not "750 ml".
     Returns [(tone, text)] where tone is 'warn', 'info' or 'ok'.
     """
     from meals.quips import with_joke
@@ -496,7 +501,9 @@ def reminders(now, entries, recipes, items, pantry, fridge, names, household, lo
             missing[(ing, base)] += q
     if missing:
         rows = list(missing.items())
-        listed = ", ".join(f"{fmt(q, base)} {names.get(ing, '?')}".replace(" pcs", "") for (ing, base), q in rows[:6])
+        usual = usual or {}
+        listed = ", ".join(f"{fmt(q, base, usual.get(ing))} {names.get(ing, '?')}".replace(" pcs", "")
+                           for (ing, base), q in rows[:6])
         more = f" and {len(rows) - 6} more" if len(rows) > 6 else ""
         first_item = names.get(rows[0][0][0], "").lower()
         fields = {k: v for k, v in (("dish", (short_dish or "").lower()), ("item", first_item)) if v}
@@ -527,3 +534,30 @@ def reminders(now, entries, recipes, items, pantry, fridge, names, household, lo
             out.append(("info", with_joke("low_stock", text, today, "", fun)))
     order = {"warn": 0, "info": 1, "ok": 2}
     return sorted(out, key=lambda x: order[x[0]])
+
+
+# ---- meals made of several dishes ------------------------------------------------------------------
+def from_leftovers(entries, recipes, items, pantry, fridge, household, today, day, slot, recipe_id, packs=None):
+    """Would a dish planned on this day and meal be eaten from leftovers (the fridge, or a bigger pot cooked
+    earlier in the plan)? Used to suggest planning just enough for the people eating, not a whole new pot."""
+    probe = {"id": -1, "day": day, "slot": slot, "recipe_id": recipe_id, "qty": float(household),
+             "status": OPEN}  # plan ids are positive, so -1 never clashes and still sorts with them
+    alloc = allocate(list(entries) + [probe], recipes, items, pantry, fridge, household, today, packs)
+    return alloc["meals"].get(-1, {}).get("status") == "leftovers"
+
+
+def meal_status(parts):
+    """One status for a meal from its dishes' statuses [(status, missing names)]:
+    done when every dish is done; short when any dish is short; leftovers when everything left comes from the
+    fridge; bought when only bought food is left; otherwise ready."""
+    open_ = [(s, m) for s, m in parts if s != "done"]
+    if not open_:
+        return "done"
+    kinds = {s for s, _ in open_}
+    if "short" in kinds:
+        return "short"
+    if kinds == {"leftovers"}:
+        return "leftovers"
+    if kinds == {"bought"}:
+        return "bought"
+    return "ready"

@@ -541,3 +541,139 @@ def test_notify_explains_telegram_errors():
     assert got == ["111"], "the good chat still got it"
     msg = str(err.value)
     assert "Sent to 1 of 2 chats" in msg and "chat not found" in msg and "minus sign" in msg
+
+
+# ---- meals of several dishes, the Ghanaian kitchen catalog, and kitchen units ----------------------------
+from meals.units import fmt_stock as qfmt_stock  # noqa: E402
+from meals.units import from_base, plural, units_for  # noqa: E402
+
+ONION_BAG = ("bag", 40, "pcs", True, {})                     # sold loose
+GARLIC_BULB = ("bulb", 6, "clove", False, {})
+SANKOFA = ("sachet", 25.0, "ml", False, {"container": 400.0})  # 5 tsp sachet, 80 tsp container
+MARGARINE = ("tub", 900.0, "g", False, {"tbsp": 15.0})
+
+
+def test_kitchen_measures_read_naturally():
+    assert qfmt(750, "ml", "cup") == "3 cups" and qfmt(15, "ml", "tbsp") == "1 tbsp"
+    assert qfmt(375, "ml", "cup") == "1½ cups", "cups are shown in cups, not millilitres"
+    assert qfmt(750, "ml") == "750 ml", "without the item's own unit nothing changes"
+    assert plural("cup") == "cups" and plural("tbsp") == "tbsp" and plural("finger", 3) == "fingers"
+    assert qfmt_stock(6250 + 1250, "ml", ("bag", 6250, "ml"), "cup") == "1.2 bags (30 cups)"
+
+
+def test_other_units_convert():
+    assert to_base(1, "container", SANKOFA) == (400.0, "ml"), "80 tsp container"
+    assert to_base(2, "sachet", SANKOFA) == (50.0, "ml"), "a sachet is 5 tsp"
+    assert to_base(2, "tbsp", MARGARINE) == (30.0, "g"), "margarine by the spoon, kept in grams"
+    assert from_base(400, "ml", "container", SANKOFA) == 1
+    assert "container" in units_for("tsp", SANKOFA) and units_for("tsp", SANKOFA)[0] == "sachet"
+
+
+def test_loose_items_are_bought_by_the_piece():
+    needs = {(30, "pcs"): {"qty": 5.0, "for": []}, (31, "clove"): {"qty": 3.0, "for": []}}
+    out = {r["ingredient_id"]: r for r in ml.shopping_list(needs, {}, packs={30: ONION_BAG, 31: GARLIC_BULB})}
+    assert (out[30]["to_buy"], out[30]["pack"]) == (5, None), "5 onions, not a 40-onion bag"
+    assert (out[31]["packs"], out[31]["pack"], out[31]["buy_qty"]) == (1, "bulb", 6), "garlic comes by the bulb"
+
+
+SOUP_WEEK = {5: {"name": "Kokonte", "portions": 2, "keeps_days": 1, "prep_note": None, "prep_hours": None,
+                 "role": "starch"},
+             6: {"name": "Palm nut soup", "portions": 14, "keeps_days": 7, "prep_note": None, "prep_hours": None,
+                 "role": "soup"}}
+SOUP_ITEMS = {5: [(40, 1.5, "cup")], 6: [(41, 800, "g"), (42, 1, "kg")]}
+
+
+def test_a_pot_of_soup_lasts_the_week():
+    """Kokonte + Palm nut soup on Monday cooks the whole pot; on Tuesday only the kokonte needs cooking."""
+    mon = plan({"id": 1, "day": D, "slot": "Lunch", "recipe_id": 5, "qty": 2},
+               {"id": 2, "day": D, "slot": "Lunch", "recipe_id": 6, "qty": 14})
+    assert ml.from_leftovers(mon, SOUP_WEEK, SOUP_ITEMS, {}, [], 2, D, D + timedelta(days=1), "Lunch", 6), \
+        "Tuesday's soup can come from Monday's pot"
+    assert not ml.from_leftovers([], SOUP_WEEK, SOUP_ITEMS, {}, [], 2, D, D, "Lunch", 6), "no pot yet: cook one"
+    assert not ml.from_leftovers(mon, SOUP_WEEK, SOUP_ITEMS, {}, [], 2, D, D, "Lunch", 6), \
+        "checking a dish for a meal that already has dishes in it"
+    tue = plan({"id": 3, "day": D + timedelta(days=1), "slot": "Lunch", "recipe_id": 5, "qty": 2},
+               {"id": 4, "day": D + timedelta(days=1), "slot": "Lunch", "recipe_id": 6, "qty": 2})
+    alloc = ml.allocate(mon + tue, SOUP_WEEK, SOUP_ITEMS, {}, [], 2, D)
+    assert alloc["meals"][4]["status"] == "leftovers" and alloc["meals"][3]["status"] == "short"
+    need = ml.shortfall(alloc, mon + tue)
+    assert need[(40, "ml")]["short"] == 750, "kokonte powder for both days: 2 x 1.5 cups"
+    assert need[(41, "g")]["short"] == 800, "palm nut cream for one pot only"
+
+
+def test_a_meal_has_one_status():
+    assert ml.meal_status([("done", []), ("done", [])]) == "done"
+    assert ml.meal_status([("ready", []), ("short", ["Okro"])]) == "short", "anything missing makes the meal short"
+    assert ml.meal_status([("leftovers", []), ("ready", [])]) == "ready", "kokonte to cook, soup from the fridge"
+    assert ml.meal_status([("leftovers", []), ("done", [])]) == "leftovers"
+    assert ml.meal_status([("bought", []), ("done", [])]) == "bought"
+
+
+def test_the_catalog_is_in_a_new_database(conn):
+    rows = dict(q(conn, "SELECT name, pack_size FROM meals.ingredients WHERE name IN ('Lele Gold evaporated milk "
+                        "(400g)', 'A55 Gold jasmine rice (5kg)', 'Yam', 'Eggs', 'Sankofa Fish')"))
+    assert float(rows["Lele Gold evaporated milk (400g)"]) == 16 * 15, "1 tin = 16 tbsp"
+    assert float(rows["A55 Gold jasmine rice (5kg)"]) == 25 * 250, "1 bag = 25 cups"
+    assert float(rows["Yam"]) == 8 and float(rows["Eggs"]) == 30 and float(rows["Sankofa Fish"]) == 25
+    assert q(conn, "SELECT count(*) FROM meals.ingredients WHERE name LIKE 'Sankofa %%'")[0][0] == 10
+    roles = dict(q(conn, "SELECT name, role FROM meals.recipes WHERE name IN ('Palm nut soup', 'Kokonte', 'Tomato stew')"))
+    assert roles == {"Palm nut soup": "soup", "Kokonte": "starch", "Tomato stew": "stew"}
+    assert q(conn, "SELECT portions FROM meals.recipes WHERE name = 'Light soup'")[0][0] == 14, "2 people, 7 days"
+    names = {r[0] for r in q(conn, "SELECT name FROM meals.pairings")}
+    assert {"Kokonte + Palm nut soup", "Fufu + Light soup", "Banku + Okra soup", "Waakye + Stew + Gari"} <= names
+    from meals.data import Kitchen
+    from meals.data import _load as kitchen_frames
+    k = Kitchen(kitchen_frames(conn))
+    waakye = next(p for p in k.pairings.values() if p["name"] == "Waakye + Stew + Gari")
+    assert [k.recipes[x["recipe_id"]]["name"] for x in waakye["parts"] if x.get("recipe_id")] == ["Waakye", "Tomato stew"]
+    assert [(k.names[x["ingredient_id"]], x["qty"], x["unit"]) for x in waakye["parts"] if x.get("ingredient_id")] == \
+        [("Gari", 0.5, "cup")], "gari, half a cup a person"
+
+
+def test_the_catalog_is_added_only_once(conn):
+    from meals.catalog import TEMPLATES, add_recipes, seed
+    with conn.cursor() as cur:
+        assert seed(cur) is False, "already there"
+        assert add_recipes(cur, TEMPLATES) == 0, "names already used are skipped"
+
+
+def test_starting_up_skips_work_when_up_to_date(conn):
+    from core.schema import SCHEMA_KEY, _version, ensure_schema
+    assert q(conn, "SELECT value FROM app_meta WHERE key = %s", (SCHEMA_KEY,)) == [(_version(),)]
+    c = psycopg2.connect(conn.dsn)
+    try:
+        ensure_schema(c)  # one read, nothing else
+        assert q(c, "SELECT count(*) FROM meals.recipes")[0][0] >= 13
+    finally:
+        c.close()
+
+
+def test_a_paired_meal_is_one_meal(conn):
+    from datetime import datetime
+
+    from core.report import monthly
+    from meals.briefing import today_summary
+    from meals.data import Kitchen
+    from meals.data import _load as kitchen_frames
+    ids = dict(q(conn, "SELECT name, id FROM meals.recipes WHERE name IN ('Kokonte', 'Palm nut soup')"))
+    made = q(conn, "INSERT INTO meals.plan (day, slot, recipe_id, qty) VALUES (CURRENT_DATE, 'Breakfast', %s, 14), "
+                   "(CURRENT_DATE, 'Breakfast', %s, 2) RETURNING id", (ids["Palm nut soup"], ids["Kokonte"]))
+    try:
+        k = Kitchen(kitchen_frames(conn))
+        parts = [e for e in k.entries(date.today()) if e["slot"] == "Breakfast"]
+        assert k.meal_name(parts) == "Kokonte + Palm nut soup", "the starch comes first"
+        assert k.meal_count(parts) == 1
+        s = today_summary(k, datetime.now())
+        assert [m[1] for m in s["meals"] if m[0] == "Breakfast"] == ["Kokonte + Palm nut soup"], "one line, not two"
+        # the soup's shopping is labelled with the meal it's for
+        needs = ml.shortfall(k.allocation(), parts, names_for_entry=k.meal_name_of)
+        assert all(n["for"] == ["Kokonte + Palm nut soup"] for n in needs.values())
+        q(conn, "UPDATE meals.plan SET status = 'cooked' WHERE id IN %s", (tuple(r[0] for r in made),))
+        k = Kitchen(kitchen_frames(conn))
+        first_next = (date.today().replace(day=1) + timedelta(days=32)).replace(day=1)
+        report = monthly(Book(_load_frames(conn)), k, first_next)
+        meals = q(conn, "SELECT count(DISTINCT (day, slot)) FROM meals.plan WHERE status <> 'planned' "
+                        "AND date_trunc('month', day) = date_trunc('month', CURRENT_DATE)")[0][0]
+        assert f"🍳 {meals} planned meal" in report, "kokonte + palm nut soup counts as one meal"
+    finally:
+        q(conn, "DELETE FROM meals.plan WHERE id IN %s", (tuple(r[0] for r in made),))

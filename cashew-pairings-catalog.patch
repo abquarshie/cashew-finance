@@ -1,0 +1,2670 @@
+diff --git a/.streamlit/secrets.toml.example b/.streamlit/secrets.toml.example
+index 48d523a..23b8066 100644
+--- a/.streamlit/secrets.toml.example
++++ b/.streamlit/secrets.toml.example
+@@ -4,4 +4,4 @@ DATABASE_URL = "postgresql://user:password@host/dbname"
+ 
+ # Sign-in uses usernames and passwords stored (hashed) in the database.
+ # The first person to open the app creates the owner account; the owner then
+-# shares an invite code (Settings → People & sign-in) with the rest of the family.
++# shares an invite code (Settings → People) with the rest of the family.
+diff --git a/core/data.py b/core/data.py
+index e24a734..ae22544 100644
+--- a/core/data.py
++++ b/core/data.py
+@@ -23,12 +23,14 @@ AUTO_PREFIX = "Auto · "
+ FEE_PREFIX = "Fee · "
+ TTL = int(os.environ.get("CASHEW_CACHE_SECONDS", "60"))  # tests shorten this
+ 
++TX_COLS = ["id", "date", "type", "category", "amount", "note", "member", "account", "to_account", "created_by"]
+ TX_SQL = ("SELECT id, date, type, category, amount, note, member, account, to_account, created_by "
+           "FROM transactions ORDER BY date DESC, id DESC")
+ 
+-# The smaller tables, each as (columns, query). They all come back together in ONE round trip
++# Every table, each as (columns, query). They all come back together in ONE round trip
+ # (as JSON), instead of one trip per table: on a distant database each trip costs ~0.1-0.2 s.
+ SMALL = {
++    "tx": (TX_COLS, TX_SQL),
+     "budgets": (["category", "monthly_limit"], "SELECT category, monthly_limit FROM budgets ORDER BY category"),
+     "cats": (["name", "group_name", "kind"], "SELECT name, group_name, kind FROM categories ORDER BY id"),
+     "accts": (["name", "opening_balance", "spendable"],
+@@ -63,8 +65,6 @@ def _as_dates(df, cols):
+ def _load_frames(conn):
+     out = {}
+     with conn.cursor() as cur:
+-        cur.execute(TX_SQL)
+-        out["tx"] = pd.DataFrame(cur.fetchall(), columns=[c[0] for c in cur.description])
+         cur.execute(SMALL_SQL)
+         row = cur.fetchone()
+     for (name, (cols, _)), records in zip(SMALL.items(), row):
+@@ -76,7 +76,7 @@ def _load_frames(conn):
+ @st.cache_resource(ttl=TTL, show_spinner=False)
+ def load_book():
+     """All data, from one database round of queries on one connection."""
+-    return Book(transact(_load_frames))
++    return Book(transact(_load_frames, read_only=True))
+ 
+ 
+ def book():
+diff --git a/core/db.py b/core/db.py
+index 0e91b85..0015866 100644
+--- a/core/db.py
++++ b/core/db.py
+@@ -4,6 +4,9 @@ Connections are kept open in a small pool and reused, instead of opening a new
+ one for every query (each new connection costs several round trips to the
+ database server, which is most of the wait on a slow link). Reads go through the
+ cached loaders in core/data.py; every write clears that cache.
++
++Reads run in autocommit mode: a transaction costs a BEGIN and a COMMIT, each its
++own round trip, so a single read inside one took three trips instead of one.
+ """
+ import pandas as pd
+ import psycopg2
+@@ -23,8 +26,9 @@ def _pool(dsn):
+     )
+ 
+ 
+-def transact(fn):
++def transact(fn, read_only=False):
+     """Run fn(conn) as one transaction on a pooled connection and return its result.
++    read_only=True skips the transaction (and its two extra round trips) for plain reads.
+ 
+     Hosted databases close connections that sit idle; if the pooled one has gone
+     stale, it is thrown away and the work is tried once more on a fresh one.
+@@ -34,6 +38,13 @@ def transact(fn):
+         conn = pool.getconn()
+         broken = False
+         try:
++            if read_only:
++                conn.autocommit = True
++                try:
++                    return fn(conn)
++                finally:
++                    if not conn.closed:
++                        conn.autocommit = False
+             result = fn(conn)
+             conn.commit()
+             return result
+@@ -57,7 +68,7 @@ def query(sql, params=None):
+         with conn.cursor() as cur:
+             cur.execute(sql, params)
+             return pd.DataFrame(cur.fetchall(), columns=[c[0] for c in cur.description])
+-    return transact(work)
++    return transact(work, read_only=True)
+ 
+ 
+ def fetch_one(sql, params=None):
+@@ -65,7 +76,7 @@ def fetch_one(sql, params=None):
+         with conn.cursor() as cur:
+             cur.execute(sql, params)
+             return cur.fetchone()
+-    return transact(work)
++    return transact(work, read_only=True)
+ 
+ 
+ def run_many(statements, refresh=True):
+diff --git a/core/report.py b/core/report.py
+index 68689b2..cbb2d99 100644
+--- a/core/report.py
++++ b/core/report.py
+@@ -89,9 +89,10 @@ def _kitchen(book, k, period, spent):
+     house = float(spent[spent["category"].isin(supplies)]["amount"].sum()) if len(spent) and supplies else 0.0
+     if house > 0:
+         lines.append(escape(f"🧽 Household supplies: {gh(house)}."))
+-    cooked = [e for e in k.plan if pd.Period(e["day"], "M") == period and e["status"] != "planned"]
++    # a meal of several dishes (kokonte + palm nut soup) counts once
++    cooked = {(e["day"], e["slot"]) for e in k.plan if pd.Period(e["day"], "M") == period and e["status"] != "planned"}
+     if cooked:
+-        lines.append(escape(f"🍳 {len(cooked)} planned meals ticked off."))
++        lines.append(escape(f"🍳 {len(cooked)} planned meal{'s' if len(cooked) != 1 else ''} ticked off."))
+     w = k.waste
+     if len(w):
+         w = w[pd.to_datetime(w["date"]).dt.to_period("M") == period]
+diff --git a/core/schema.py b/core/schema.py
+index ca8bebe..82669c7 100644
+--- a/core/schema.py
++++ b/core/schema.py
+@@ -130,14 +130,44 @@ TABLES = [
+     "ALTER TABLE accounts ALTER COLUMN spendable SET DEFAULT TRUE",
+     # speeds up the newest-first listing as the history grows
+     "CREATE INDEX IF NOT EXISTS transactions_date_idx ON transactions (date DESC, id DESC)",
++    # the double-entry check looks for the same category and amount
++    "CREATE INDEX IF NOT EXISTS transactions_cat_amount_idx ON transactions (category, amount)",
+ ]
+ 
+ 
++def _version():
++    """A fingerprint of every table definition and the starting data. When the database already carries it,
++    there's nothing to create or upgrade, so starting up costs one quick query instead of dozens."""
++    import hashlib
++
++    from meals.catalog import FLAG
++    from meals.schema import TABLES as MEAL_TABLES
++    text = "\n".join(TABLES + MEAL_TABLES + [FLAG, repr(SEED_CATEGORIES), repr(SEED_ACCOUNTS)])
++    return hashlib.sha1(text.encode()).hexdigest()[:16]
++
++
++SCHEMA_KEY = "schema_version"
++
++
+ def ensure_schema(conn):
+-    """Create or upgrade every table, and add the starting categories once. Safe to run every time."""
++    """Create or upgrade every table, and add the starting categories and kitchen catalog once.
++    Safe to run every time; when the database is already up to date it only reads one value."""
++    from meals.catalog import seed as seed_kitchen
+     from meals.schema import ensure_meals_schema
+ 
++    version = _version()
+     cur = conn.cursor()
++    try:
++        cur.execute("SELECT value FROM app_meta WHERE key = %s", (SCHEMA_KEY,))
++        row = cur.fetchone()
++    except Exception:  # a brand-new database has no app_meta table yet
++        conn.rollback()
++        cur = conn.cursor()
++        row = None
++    if row and row[0] == version:
++        conn.commit()
++        cur.close()
++        return
+     for sql in TABLES:
+         cur.execute(sql)
+     ensure_meals_schema(cur)
+@@ -153,5 +183,8 @@ def ensure_schema(conn):
+             cur.execute("INSERT INTO accounts (name, spendable) VALUES (%s, NOT (%s ~* %s)) ON CONFLICT (name) DO NOTHING",
+                         (acct, acct, SAVINGS_WORDS))
+         cur.execute("INSERT INTO app_meta (key, value) VALUES ('seeded_v2', 'yes')")
++    seed_kitchen(cur)
++    cur.execute("INSERT INTO app_meta (key, value) VALUES (%s, %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
++                (SCHEMA_KEY, version))
+     conn.commit()
+     cur.close()
+diff --git a/meals/actions.py b/meals/actions.py
+index df9c2cb..dbbdd68 100644
+--- a/meals/actions.py
++++ b/meals/actions.py
+@@ -71,6 +71,65 @@ def _entry(cur, entry_id):
+ 
+ 
+ # ---- ticking meals ----------------------------------------------------------------------------
++def _is_bought(cur, e):
++    if e["recipe_id"]:
++        cur.execute("SELECT bought FROM meals.recipes WHERE id = %s", (e["recipe_id"],))
++        row = cur.fetchone()
++        return bool(row and row[0])
++    return not e["ingredient_id"] and bool(e["label"])
++
++
++def _cook(cur, e, household, packs):
++    """The recipe's ingredients come out of the pantry; portions not eaten now go into the fridge.
++    Returns ingredients that weren't in the pantry."""
++    r, items = _recipe(cur, e["recipe_id"])
++    uses = entry_needs(e, {e["recipe_id"]: r}, {e["recipe_id"]: items}, packs)
++    removed, short = [], []
++    for ing, base, q in uses:
++        took = _take_stock(cur, ing, base, q)
++        removed.append([ing, base, took])
++        if q - took > 1e-6:
++            short.append((ing, base, q - took))
++    left = max(e["qty"] - min(float(household), e["qty"]), 0.0)
++    made = None
++    if left > 0:
++        cooked = date.today()
++        cur.execute("INSERT INTO meals.fridge (recipe_id, label, portions, cooked_on, eat_by, plan_id, created_by) "
++                    "VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
++                    (e["recipe_id"], r["name"], left, cooked, cooked + timedelta(days=r["keeps_days"]), e["id"], _me()))
++        made = [cur.fetchone()[0], left]
++    cur.execute("UPDATE meals.plan SET status = 'cooked', done_at = now(), done_by = %s, undo = %s WHERE id = %s",
++                (_me(), json.dumps({"pantry": removed, "fridge_made": made}), e["id"]))
++    return short
++
++
++def _eat_leftovers(cur, e, household, fresh_only=False):
++    """Portions come off the oldest leftovers first. Returns portions that weren't there."""
++    wanted = min(float(household), e["qty"])
++    cur.execute("SELECT id, portions FROM meals.fridge WHERE recipe_id = %s AND portions > 0 "
++                + ("AND eat_by >= CURRENT_DATE " if fresh_only else "") + "ORDER BY eat_by, id FOR UPDATE",
++                (e["recipe_id"],))
++    taken, left = [], wanted
++    for bid, portions in cur.fetchall():
++        if left <= 0:
++            break
++        t = min(float(portions), left)
++        cur.execute("UPDATE meals.fridge SET portions = portions - %s WHERE id = %s", (t, bid))
++        taken.append([bid, t])
++        left -= t
++    cur.execute("UPDATE meals.plan SET status = 'from_fridge', done_at = now(), done_by = %s, undo = %s "
++                "WHERE id = %s", (_me(), json.dumps({"fridge_taken": taken}), e["id"]))
++    return max(left, 0.0)
++
++
++def _eaten(cur, e, packs):
++    """A plain item (fruit, bread, gari) comes out of the pantry."""
++    q, base = to_base(e["qty"], e["unit"] or "pcs", packs.get(e["ingredient_id"]))
++    took = _take_stock(cur, e["ingredient_id"], base, q)
++    cur.execute("UPDATE meals.plan SET status = 'done', done_at = now(), done_by = %s, undo = %s WHERE id = %s",
++                (_me(), json.dumps({"pantry": [[e["ingredient_id"], base, took]]}), e["id"]))
++
++
+ def mark_cooked(entry_id, household):
+     """Cooked: the recipe's ingredients come out of the pantry, and portions not eaten at
+     this meal go into the fridge. Returns ingredients that weren't in the pantry."""
+@@ -79,26 +138,7 @@ def mark_cooked(entry_id, household):
+             e = _entry(cur, entry_id)
+             if not e or e["status"] != OPEN or not e["recipe_id"]:
+                 return []
+-            r, items = _recipe(cur, e["recipe_id"])
+-            uses = entry_needs(e, {e["recipe_id"]: r}, {e["recipe_id"]: items}, _packs(cur))
+-            removed, short = [], []
+-            for ing, base, q in uses:
+-                took = _take_stock(cur, ing, base, q)
+-                removed.append([ing, base, took])
+-                if q - took > 1e-6:
+-                    short.append((ing, base, q - took))
+-            left = max(e["qty"] - min(float(household), e["qty"]), 0.0)
+-            made = None
+-            if left > 0:
+-                cooked = date.today()
+-                cur.execute("INSERT INTO meals.fridge (recipe_id, label, portions, cooked_on, eat_by, plan_id, created_by) "
+-                            "VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
+-                            (e["recipe_id"], r["name"], left, cooked, cooked + timedelta(days=r["keeps_days"]),
+-                             e["id"], _me()))
+-                made = [cur.fetchone()[0], left]
+-            cur.execute("UPDATE meals.plan SET status = 'cooked', done_at = now(), done_by = %s, undo = %s WHERE id = %s",
+-                        (_me(), json.dumps({"pantry": removed, "fridge_made": made}), e["id"]))
+-            return short
++            return _cook(cur, e, household, _packs(cur))
+     return _run(work)
+ 
+ 
+@@ -109,20 +149,7 @@ def mark_from_fridge(entry_id, household):
+             e = _entry(cur, entry_id)
+             if not e or e["status"] != OPEN or not e["recipe_id"]:
+                 return 0
+-            wanted = min(float(household), e["qty"])
+-            cur.execute("SELECT id, portions FROM meals.fridge WHERE recipe_id = %s AND portions > 0 "
+-                        "ORDER BY eat_by, id FOR UPDATE", (e["recipe_id"],))
+-            taken, left = [], wanted
+-            for bid, portions in cur.fetchall():
+-                if left <= 0:
+-                    break
+-                t = min(float(portions), left)
+-                cur.execute("UPDATE meals.fridge SET portions = portions - %s WHERE id = %s", (t, bid))
+-                taken.append([bid, t])
+-                left -= t
+-            cur.execute("UPDATE meals.plan SET status = 'from_fridge', done_at = now(), done_by = %s, undo = %s "
+-                        "WHERE id = %s", (_me(), json.dumps({"fridge_taken": taken}), e["id"]))
+-            return max(left, 0.0)
++            return _eat_leftovers(cur, e, household)
+     return _run(work)
+ 
+ 
+@@ -133,47 +160,109 @@ def mark_done(entry_id):
+             e = _entry(cur, entry_id)
+             if not e or e["status"] != OPEN or not e["ingredient_id"]:
+                 return
+-            q, base = to_base(e["qty"], e["unit"] or "pcs", _packs(cur).get(e["ingredient_id"]))
+-            took = _take_stock(cur, e["ingredient_id"], base, q)
+-            cur.execute("UPDATE meals.plan SET status = 'done', done_at = now(), done_by = %s, undo = %s WHERE id = %s",
+-                        (_me(), json.dumps({"pantry": [[e["ingredient_id"], base, took]]}), e["id"]))
++            _eaten(cur, e, _packs(cur))
++    _run(work)
++
++
++def mark_meal(entry_ids, household):
++    """A meal of several dishes was eaten (Kokonte + Palm nut soup), all in one go:
++    - a dish with enough fresh leftovers in the fridge is eaten from there (the week's soup),
++    - any other dish is cooked: its ingredients come out of the pantry, extra portions go into the fridge,
++    - plain items (gari, bread) come out of the pantry.
++    Bought food isn't touched: it's ticked off when it's paid for.
++    Returns {"cooked": [names], "fridge": [names], "short": [(ing, base, qty)], "fridge_short": portions}."""
++    def work(conn):
++        out = {"cooked": [], "fridge": [], "eaten": [], "short": [], "fridge_short": 0.0}
++        with conn.cursor() as cur:
++            packs = _packs(cur)
++            for entry_id in entry_ids:
++                e = _entry(cur, entry_id)
++                if not e or e["status"] != OPEN or _is_bought(cur, e):
++                    continue
++                if e["recipe_id"]:
++                    name = _recipe(cur, e["recipe_id"])[0]["name"]
++                    want = min(float(household), e["qty"])
++                    cur.execute("SELECT COALESCE(SUM(portions), 0) FROM meals.fridge WHERE recipe_id = %s "
++                                "AND portions > 0 AND eat_by >= CURRENT_DATE", (e["recipe_id"],))
++                    if float(cur.fetchone()[0]) >= want - 1e-9:
++                        out["fridge_short"] += _eat_leftovers(cur, e, household, fresh_only=True)
++                        out["fridge"].append(name)
++                    else:
++                        out["short"] += _cook(cur, e, household, packs)
++                        out["cooked"].append(name)
++                elif e["ingredient_id"]:
++                    _eaten(cur, e, packs)
++                    out["eaten"].append(e["ingredient_id"])
++        return out
++    return _run(work)
++
++
++def untick_meal(entry_ids):
++    """Put the pantry, fridge and any payment back for every ticked dish of a meal."""
++    def work(conn):
++        with conn.cursor() as cur:
++            for entry_id in entry_ids:
++                e = _entry(cur, entry_id)
++                if not e or e["status"] == OPEN:
++                    continue
++                _reverse(cur, e)
++                cur.execute("UPDATE meals.plan SET status = 'planned', done_at = NULL, done_by = NULL, undo = NULL "
++                            "WHERE id = %s", (e["id"],))
+     _run(work)
++    invalidate()
++
++
++def _buy(cur, entries, paid, account, category):
++    """One payment for the bought food in a meal (kenkey and fried fish together are one expense).
++    The amount is shared between the dishes by their usual prices, to keep each dish's price up to date."""
++    from core.data import SHARED
++    from meals.units import frac, plural
++
++    rows = []
++    for e in entries:
++        if e["recipe_id"]:
++            cur.execute("SELECT name, count_unit, shop, price FROM meals.recipes WHERE id = %s", (e["recipe_id"],))
++            name, unit, shop, before = cur.fetchone()
++        else:
++            name, unit, shop, before = e["label"], e["unit"], None, None
++        expected = float(e["price"] or before or 0) * float(e["qty"])
++        rows.append((e, name, unit or "portion", shop, before, expected))
++    when = min(min(e["day"] for e in entries), date.today())
++    shops = list(dict.fromkeys(r[3] for r in rows if r[3]))
++    note = "Bought: " + " + ".join(f"{name} ({frac(e['qty'])} {plural(unit, e['qty'])})" for e, name, unit, *_ in rows) \
++        + (f" at {', '.join(shops)}" if shops else "")
++    cur.execute("INSERT INTO transactions (date, type, category, amount, note, member, account, created_by) "
++                "VALUES (%s, 'Expense', %s, %s, %s, %s, %s, %s) RETURNING id",
++                (when, category, round(float(paid), 2), note, SHARED, account, _me()))
++    tx = cur.fetchone()[0]
++    total_expected = sum(r[5] for r in rows)
++    for e, name, unit, shop, before, expected in rows:
++        share = float(paid) * (expected / total_expected if total_expected else 1 / len(rows))
++        cur.execute("INSERT INTO meals.bought (date, plan_id, recipe_id, label, qty, unit, paid, shop) "
++                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
++                    (when, e["id"], e["recipe_id"], name, e["qty"], unit, round(share, 2), shop))
++        bought_id = cur.fetchone()[0]
++        if e["recipe_id"] and e["qty"]:
++            cur.execute("UPDATE meals.recipes SET price = %s WHERE id = %s",
++                        (round(share / float(e["qty"]), 2), e["recipe_id"]))
++        undo = {"tx": tx, "bought": bought_id, "price_before": float(before) if before is not None else None}
++        cur.execute("UPDATE meals.plan SET status = 'bought', done_at = now(), done_by = %s, undo = %s WHERE id = %s",
++                    (_me(), json.dumps(undo), e["id"]))
++    return tx
+ 
+ 
+ def mark_bought(entry_id, paid, account, category):
+     """Bought food was bought: the payment goes into the money records as an expense, the price is remembered
+-    for next time (and for price trends), and unticking takes it all back out."""
+-    from core.data import SHARED
++    for next time (and for price trends), and unticking takes it all back out.
++    entry_id can be a list: the bought dishes of one meal are paid for together, as one expense."""
++    ids = entry_id if isinstance(entry_id, (list, tuple)) else [entry_id]
+ 
+     def work(conn):
+         with conn.cursor() as cur:
+-            e = _entry(cur, entry_id)
+-            if not e or e["status"] != OPEN:
++            entries = [e for e in (_entry(cur, i) for i in ids) if e and e["status"] == OPEN]
++            if not entries:
+                 return None
+-            if e["recipe_id"]:
+-                cur.execute("SELECT name, count_unit, shop, price FROM meals.recipes WHERE id = %s", (e["recipe_id"],))
+-                name, unit, shop, before = cur.fetchone()
+-            else:
+-                name, unit, shop, before = e["label"], e["unit"], None, None
+-            unit = unit or "portion"
+-            when = min(e["day"], date.today())
+-            from meals.units import frac, plural
+-            note = f"Bought: {name} ({frac(e['qty'])} {plural(unit, e['qty'])})" + (f" at {shop}" if shop else "")
+-            cur.execute("INSERT INTO transactions (date, type, category, amount, note, member, account, created_by) "
+-                        "VALUES (%s, 'Expense', %s, %s, %s, %s, %s, %s) RETURNING id",
+-                        (when, category, round(float(paid), 2), note, SHARED, account, _me()))
+-            tx = cur.fetchone()[0]
+-            cur.execute("INSERT INTO meals.bought (date, plan_id, recipe_id, label, qty, unit, paid, shop) "
+-                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+-                        (when, e["id"], e["recipe_id"], name, e["qty"], unit, float(paid), shop))
+-            bought_id = cur.fetchone()[0]
+-            if e["recipe_id"] and e["qty"]:
+-                cur.execute("UPDATE meals.recipes SET price = %s WHERE id = %s",
+-                            (round(float(paid) / float(e["qty"]), 2), e["recipe_id"]))
+-            undo = {"tx": tx, "bought": bought_id, "price_before": float(before) if before is not None else None}
+-            cur.execute("UPDATE meals.plan SET status = 'bought', done_at = now(), done_by = %s, undo = %s WHERE id = %s",
+-                        (_me(), json.dumps(undo), e["id"]))
+-            return tx
++            return _buy(cur, entries, paid, account, category)
+     out = _run(work)
+     invalidate()  # the new expense shows on the money side straight away
+     return out
+@@ -182,7 +271,7 @@ def mark_bought(entry_id, paid, account, category):
+ def _reverse(cur, e):
+     """Undo what ticking this entry did to the pantry and fridge (or, for bought food, the payment)."""
+     undo = e["undo"] or {}
+-    if undo.get("tx"):
++    if undo.get("tx"):  # a shared payment (several bought dishes in one meal) is deleted by the first one
+         cur.execute("DELETE FROM transactions WHERE id = %s", (undo["tx"],))
+         cur.execute("DELETE FROM meals.bought WHERE id = %s", (undo.get("bought"),))
+         if e.get("recipe_id") and "price_before" in undo:
+@@ -234,12 +323,16 @@ def add_many(entries):
+ 
+ 
+ def remove_from_plan(entry_id):
++    """Remove a dish (or, given a list, every dish of a meal) from the plan."""
++    ids = entry_id if isinstance(entry_id, (list, tuple)) else [entry_id]
++
+     def work(conn):
+         with conn.cursor() as cur:
+-            e = _entry(cur, entry_id)
+-            if e and e["status"] != OPEN:
+-                _reverse(cur, e)  # removing a ticked meal puts its ingredients and portions back
+-            cur.execute("DELETE FROM meals.plan WHERE id = %s", (entry_id,))
++            for i in ids:
++                e = _entry(cur, i)
++                if e and e["status"] != OPEN:
++                    _reverse(cur, e)  # removing a ticked meal puts its ingredients and portions back
++                cur.execute("DELETE FROM meals.plan WHERE id = %s", (i,))
+     _run(work)
+     invalidate()
+ 
+@@ -271,14 +364,16 @@ def set_household(n):
+ 
+ 
+ # ---- ingredients and recipes -------------------------------------------------------------------
+-def add_ingredient(name, unit, category, low_level=None, pack_name=None, pack_size=None, kind="food"):
++def add_ingredient(name, unit, category, low_level=None, pack_name=None, pack_size=None, kind="food", loose=False,
++                   section=None):
+     """pack_size is in the base unit (e.g. 30 for a crate of eggs, 5000 for a 5 kg bag of rice).
+     kind: 'food', or 'household' for cleaning things, toilet roll and other supplies."""
+     def work(conn):
+         with conn.cursor() as cur:
+-            cur.execute("INSERT INTO meals.ingredients (name, unit, category, low_level, pack_name, pack_size, kind) "
+-                        "VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
+-                        (name.strip(), unit, category, low_level, pack_name or None, pack_size or None, kind))
++            cur.execute("INSERT INTO meals.ingredients (name, unit, category, low_level, pack_name, pack_size, kind, "
++                        "loose, section) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
++                        (name.strip(), unit, category, low_level, pack_name or None, pack_size or None, kind,
++                         bool(loose), section or None))
+             return cur.fetchone()[0]
+     return _run(work)
+ 
+@@ -336,12 +431,15 @@ def set_budget(category, limit):
+             "ON CONFLICT (category) DO UPDATE SET monthly_limit = EXCLUDED.monthly_limit", (category, float(limit)))
+ 
+ 
+-def update_ingredient(ing_id, name, unit, category, low_level, pack_name=None, pack_size=None):
++def update_ingredient(ing_id, name, unit, category, low_level, pack_name=None, pack_size=None, loose=None,
++                      section=None):
+     def work(conn):
+         with conn.cursor() as cur:
+             cur.execute("UPDATE meals.ingredients SET name = %s, unit = %s, category = %s, low_level = %s, "
+-                        "pack_name = %s, pack_size = %s WHERE id = %s",
+-                        (name.strip(), unit, category, low_level, pack_name or None, pack_size or None, ing_id))
++                        "pack_name = %s, pack_size = %s, loose = COALESCE(%s, loose), section = COALESCE(%s, section) "
++                        "WHERE id = %s",
++                        (name.strip(), unit, category, low_level, pack_name or None, pack_size or None, loose,
++                         section or None, ing_id))
+     _run(work)
+ 
+ 
+@@ -352,19 +450,21 @@ def delete_ingredient(ing_id):
+     _run(work)
+ 
+ 
+-def save_recipe(recipe_id, name, portions, keeps_days, prep_note, prep_hours, method, lines):
+-    """Create or update a recipe and replace its ingredient lines [(ingredient_id, qty, unit)]. Returns its id."""
++def save_recipe(recipe_id, name, portions, keeps_days, prep_note, prep_hours, method, lines, role="main"):
++    """Create or update a recipe and replace its ingredient lines [(ingredient_id, qty, unit)]. Returns its id.
++    role: starch, soup, stew, sauce, side or main (see logic.ROLES)."""
+     def work(conn):
+         with conn.cursor() as cur:
+-            fields = (name.strip(), round(float(portions), 2), int(keeps_days), prep_note or None, prep_hours or None, method or None)
++            fields = (name.strip(), round(float(portions), 2), int(keeps_days), prep_note or None, prep_hours or None,
++                      method or None, role or "main")
+             if recipe_id:
+                 cur.execute("UPDATE meals.recipes SET name=%s, portions=%s, keeps_days=%s, prep_note=%s, prep_hours=%s, "
+-                            "method=%s, bought=FALSE WHERE id=%s", fields + (recipe_id,))
++                            "method=%s, role=%s, bought=FALSE WHERE id=%s", fields + (recipe_id,))
+                 rid = recipe_id
+                 cur.execute("DELETE FROM meals.recipe_items WHERE recipe_id = %s", (rid,))
+             else:
+-                cur.execute("INSERT INTO meals.recipes (name, portions, keeps_days, prep_note, prep_hours, method) "
+-                            "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id", fields)
++                cur.execute("INSERT INTO meals.recipes (name, portions, keeps_days, prep_note, prep_hours, method, role) "
++                            "VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id", fields)
+                 rid = cur.fetchone()[0]
+             for ing, qty, unit in lines:
+                 cur.execute("INSERT INTO meals.recipe_items (recipe_id, ingredient_id, qty, unit) VALUES (%s, %s, %s, %s)",
+@@ -400,6 +500,48 @@ def delete_recipe(recipe_id):
+     _run(work)
+ 
+ 
++# ---- pairings ---------------------------------------------------------------------------------------
++def save_pairing(pairing_id, name, recipe_ids, side=None):
++    """Create or replace a pairing for the planner: its dishes, and optionally a side item eaten with it
++    as (ingredient_id, amount per person, unit). Returns its id."""
++    def work(conn):
++        with conn.cursor() as cur:
++            if pairing_id:
++                cur.execute("UPDATE meals.pairings SET name = %s WHERE id = %s", (name.strip(), pairing_id))
++                cur.execute("DELETE FROM meals.pairing_items WHERE pairing_id = %s", (pairing_id,))
++                pid = pairing_id
++            else:
++                cur.execute("INSERT INTO meals.pairings (name) VALUES (%s) RETURNING id", (name.strip(),))
++                pid = cur.fetchone()[0]
++            for rid in recipe_ids:
++                cur.execute("INSERT INTO meals.pairing_items (pairing_id, recipe_id) VALUES (%s, %s)", (pid, rid))
++            if side:
++                cur.execute("INSERT INTO meals.pairing_items (pairing_id, ingredient_id, qty, unit) VALUES (%s, %s, %s, %s)",
++                            (pid, side[0], side[1], side[2]))
++            return pid
++    return _run(work)
++
++
++def delete_pairing(pairing_id):
++    def work(conn):
++        with conn.cursor() as cur:
++            cur.execute("DELETE FROM meals.pairings WHERE id = %s", (pairing_id,))
++    _run(work)
++
++
++def load_catalog():
++    """Add (again) whatever is missing from the Ghanaian kitchen catalog, templates and pairings.
++    Returns (recipes added, pairings added)."""
++    from meals.catalog import CATALOG, TEMPLATES, add_items, add_pairings, add_recipes
++
++    def work(conn):
++        with conn.cursor() as cur:
++            cur.execute("SELECT name FROM categories WHERE kind = 'Expense' ORDER BY id")
++            add_items(cur, CATALOG, [r[0] for r in cur.fetchall()])
++            return add_recipes(cur, TEMPLATES), add_pairings(cur)
++    return _run(work)
++
++
+ # ---- fridge and pantry -------------------------------------------------------------------------
+ def set_portions(batch_id, portions):
+     def work(conn):
+@@ -495,8 +637,9 @@ def save_trip(day, account, lines, shop=None):
+     return trip, {c: round(sum(i["price"] for i in items), 2) for c, items in by_cat.items()}, changes
+ 
+ 
+-def describe_short(short, names):
+-    return ", ".join(f"{fmt(q, base)} {names.get(ing, '?')}".replace(" pcs", "") for ing, base, q in short)
++def describe_short(short, names, usual=None):
++    usual = usual or {}
++    return ", ".join(f"{fmt(q, base, usual.get(ing))} {names.get(ing, '?')}".replace(" pcs", "") for ing, base, q in short)
+ 
+ 
+ def default_low(unit):
+diff --git a/meals/briefing.py b/meals/briefing.py
+index 298b865..1d00f52 100644
+--- a/meals/briefing.py
++++ b/meals/briefing.py
+@@ -6,8 +6,8 @@ shows exactly the same thing on Home, on the meal plan and in the preview.
+ from datetime import date, timedelta
+ from html import escape
+ 
+-from meals.logic import (GUARD_JOKE, OPEN, SLOTS, bought_cost, budget_guard, food_budget, shopping_list,
+-                          shortfall)
++from meals.logic import (GUARD_JOKE, OPEN, SLOTS, bought_cost, budget_guard, food_budget, meal_status,
++                          shopping_list, shortfall)
+ from meals.quips import with_joke
+ from meals.units import base_of, fmt, plural, to_base
+ 
+@@ -34,6 +34,33 @@ def entry_status(k, e, today):
+     return "ready", "all in"
+ 
+ 
++def meal_state(k, parts, today):
++    """(status, short label) for a whole meal, e.g. Kokonte + Palm nut soup: the soup from the fridge and the
++    kokonte to cook counts as all in; anything missing for either dish makes the meal short."""
++    if len(parts) == 1:
++        return entry_status(k, parts[0], today)
++    states, missing = [], []
++    for e in parts:
++        status, label = entry_status(k, e, today)
++        m = k.meal_status(e["id"], today) or {}
++        names = [k.names.get(ing, "?") for ing, _, _ in m.get("missing", [])] if status == "short" else []
++        missing += [n for n in names if n not in missing]
++        states.append((status, names))
++    status = meal_status(states)
++    if status == "done":
++        return "done", "done"
++    if status == "short":
++        return "short", "missing " + ", ".join(missing[:3]) + (f" +{len(missing) - 3}" if len(missing) > 3 else "")
++    if status == "leftovers":
++        return "leftovers", "from the fridge"
++    if status == "bought":
++        return "bought", "buy on the day"
++    fridge = [k.entry_name(e) for e, (s, _) in zip(parts, states) if s == "leftovers"]
++    to_buy = [k.entry_name(e) for e, (s, _) in zip(parts, states) if s == "bought"]
++    extra = ([f"{', '.join(fridge)} from the fridge"] if fridge else []) + ([f"buy {', '.join(to_buy)}"] if to_buy else [])
++    return "ready", "all in" + (f" ({'; '.join(extra)})" if extra else "")
++
++
+ def today_summary(k, now):
+     """What to cook today and whether it's all in, plus the one reminder that matters most.
+ 
+@@ -42,10 +69,10 @@ def today_summary(k, now):
+     today = now.date()
+     meals = []
+     for slot in SLOTS:
+-        for e in k.entries(today):
+-            if e["slot"] == slot:
+-                status, label = entry_status(k, e, today)
+-                meals.append((slot, k.entry_name(e), status, label))
++        parts = [e for e in k.entries(today) if e["slot"] == slot]
++        if parts:
++            status, label = meal_state(k, parts, today)
++            meals.append((slot, k.meal_name(parts), status, label))
+     notes = k.notes(now)
+     if notes:
+         note = notes[0]
+@@ -103,13 +130,11 @@ def guard(k, book, today, kind="food"):
+ def _menu(k, day):
+     lines = []
+     for slot in SLOTS:
+-        entries = [e for e in k.entries(day) if e["slot"] == slot]
+-        if entries:
+-            parts = []
+-            for e in entries:
+-                status, label = entry_status(k, e, day)
+-                parts.append(f"{k.entry_name(e)} {STATUS_ICON[status]}" + (f" ({label})" if status == "short" else ""))
+-            lines.append(f"<b>{slot}:</b> {escape(', '.join(parts))}")
++        parts = [e for e in k.entries(day) if e["slot"] == slot]
++        if parts:
++            status, label = meal_state(k, parts, day)
++            text = f"{k.meal_name(parts)} {STATUS_ICON[status]}" + (f" ({label})" if status == "short" else "")
++            lines.append(f"<b>{slot}:</b> {escape(text)}")
+     return lines
+ 
+ 
+@@ -163,7 +188,7 @@ def evening(k, now):
+         out += [""] + [f"{ICON[t]} {escape(x)}" for t, x in notes]
+     elif to_buy:
+         items = ", ".join(
+-            (f"{r['packs']} {plural(r['pack'], r['packs'])} " if r["pack"] else f"{fmt(r['to_buy'], r['base'])} ")
++            (f"{r['packs']} {plural(r['pack'], r['packs'])} " if r["pack"] else f"{fmt(r['to_buy'], r['base'], k.unit_of.get(r['ingredient_id']))} ")
+             .replace("pcs ", "") + k.names.get(r["ingredient_id"], "?") for r in to_buy[:8])
+         out += ["", f"🛒 Buy for tomorrow: {escape(items)}"]
+     return "\n".join(out)
+diff --git a/meals/catalog.py b/meals/catalog.py
+new file mode 100644
+index 0000000..03c5af6
+--- /dev/null
++++ b/meals/catalog.py
+@@ -0,0 +1,283 @@
++"""The Ghanaian kitchen catalog: everyday ingredients with how they're bought and measured, classic soup and
++stew templates, the starches they're eaten with, and ready-made pairings for the planner.
++
++It is added to the database once (see seed()), alongside anything already there:
++- an item that already exists under the same name (any capitals) is kept as it is; only a missing
++  container or shelf is filled in, and only when it's measured the same way;
++- a recipe or pairing that already exists by name is left alone;
++- after that, everything can be changed or deleted in the app, and nothing comes back.
++
++No Streamlit here: it runs inside ensure_schema(), so the daily job can set a new database up too.
++"""
++import json
++
++from meals.units import base_of, to_base
++
++FLAG = "seeded_kitchen_gh1"
++
++DAIRY, GRAINS, PROTEIN, AROMATICS, SANKOFA, BASICS = (
++    "Dairy, beverages & pantry", "Grains & starches", "Proteins & seafood", "Oils, sauces & aromatics",
++    "Sankofa spices", "Soup & stew basics")
++SECTIONS = [DAIRY, GRAINS, PROTEIN, AROMATICS, SANKOFA, BASICS]
++
++# (shelf, name, base unit, money category, purchase unit, how many base units in one, sold loose, {other unit: base units})
++# "Base unit" is what recipes and the pantry count in; the purchase unit is what you bring home from the market.
++CATALOG = [
++    # ---- dairy, beverages and pantry: specific household products ----
++    (DAIRY, "Lele Gold evaporated milk (400g)", "tbsp", "Dairy/Cereal", "tin", 16, False, None),
++    (DAIRY, "Lipton Yellow Label tea", "teabag", "Dairy/Cereal", "pack", 25, False, None),
++    (DAIRY, "Josd brown cocoa powder (400g)", "tbsp", "Dairy/Cereal", "jar", 80, False, None),
++    (DAIRY, "Cook Brand margarine (900g)", "g", "Dairy/Cereal", "tub", 900, False, {"tbsp": 15}),   # ~60 tbsp a tub
++    (DAIRY, "Pride of the West flour (2kg)", "cup", "Staples", "bag", 16, False, {"kg": 8}),          # 16 cups = 2 kg
++    # ---- grains and starches ----
++    (GRAINS, "A55 Gold jasmine rice (5kg)", "cup", "Staples", "bag", 25, False, {"kg": 5}),          # 25 cups = 5 kg
++    (GRAINS, "Black-eyed peas (beans)", "cup", "Staples", "olonka", 6, False, None),
++    (GRAINS, "Yam", "slice", "Staples", "tuber", 8, False, None),
++    (GRAINS, "Plantain", "finger", "Fruits/Veges", "bundle", 5, True, None),
++    (GRAINS, "Gari", "cup", "Staples", "olonka", 8, False, None),
++    (GRAINS, "Kokonte powder", "cup", "Staples", "bag", 10, False, None),
++    (GRAINS, "Fermented corn dough", "cup", "Staples", "kilo", 4, False, None),
++    (GRAINS, "Fermented cassava dough", "cup", "Staples", "kilo", 4, False, None),
++    (GRAINS, "Cassava", "kg", "Staples", None, None, False, None),
++    # ---- proteins and seafood: meat is bought by the kilo (1 kg = 1000 g) ----
++    (PROTEIN, "Fresh tilapia", "kg", "Meat/Fish", None, None, False, None),
++    (PROTEIN, "Hard chicken", "kg", "Meat/Fish", None, None, False, None),
++    (PROTEIN, "Beef", "kg", "Meat/Fish", None, None, False, None),
++    (PROTEIN, "Goat meat", "kg", "Meat/Fish", None, None, False, None),
++    (PROTEIN, "Crabs", "pcs", "Meat/Fish", "set", 6, False, None),
++    (PROTEIN, "Snails", "pcs", "Meat/Fish", "set", 6, False, None),
++    (PROTEIN, "Adɔde (Volta clams)", "cup", "Meat/Fish", None, None, False, None),
++    (PROTEIN, "Eggs", "pcs", "Dairy/Cereal", "crate", 30, False, None),
++    (PROTEIN, "Smoked mackerel", "pcs", "Meat/Fish", None, None, False, None),
++    # ---- oils, sauces and aromatics ----
++    (AROMATICS, "Tasty Tom tomato mix", "tbsp", "Canned or Sachet items", "pouch", 4, False, None),
++    (AROMATICS, "Vegetable oil", "l", "Oils", "bottle", 1, False, None),
++    (AROMATICS, "Palm oil", "l", "Oils", "bottle", 1, False, None),
++    (AROMATICS, "Tomato paste", "tbsp", "Canned or Sachet items", "tin", 4, False, None),
++    (AROMATICS, "Tomatoes", "pcs", "Fruits/Veges", "basket", 35, True, None),       # medium tomatoes, 5 kg basket
++    (AROMATICS, "Onions", "pcs", "Fruits/Veges", "bag", 40, True, None),            # medium onions
++    (AROMATICS, "Ginger", "tbsp", "Spices", "thumb", 1.5, False, None),             # 1 thumb = 1.5 tbsp blended
++    (AROMATICS, "Garlic", "clove", "Spices", "bulb", 6, False, None),
++    (AROMATICS, "Pepper", "pcs", "Fruits/Veges", None, None, False, None),
++    # ---- what the soup and stew templates need besides the above ----
++    (BASICS, "Garden eggs", "pcs", "Fruits/Veges", None, None, False, None),
++    (BASICS, "Kontomire", "bunch", "Fruits/Veges", None, None, False, None),
++    (BASICS, "Okro", "pcs", "Fruits/Veges", None, None, False, None),
++    (BASICS, "Groundnut paste", "g", "Canned or Sachet items", "jar", 500, False, None),
++    (BASICS, "Palm nut cream", "g", "Canned or Sachet items", "tin", 800, False, None),
++]
++# Sankofa natural spices: every flavour comes as a 25 g sachet (5 tsp) or a 400 g container (80 tsp)
++SANKOFA_FLAVOURS = ["Stew & Gravy", "Soup Seasoning", "Jollof Rice", "Chicken", "Beef", "Fish", "Noodles & Pasta",
++                    "Ginger & Garlic", "Hot Pepper Blend", "Curry Powder"]
++CATALOG += [(SANKOFA, f"Sankofa {f}", "tsp", "Spices", "sachet", 5, False, {"container": 80}) for f in SANKOFA_FLAVOURS]
++
++# When a database already has one of these items measured another way (the old starter recipes counted
++# ginger in grams and garlic in pieces), template amounts are converted with these rough equivalents:
++# {item: {that base unit: how much of it one catalog unit is}}. Without an equivalent the line is skipped.
++EQUIV = {
++    "ginger": {"g": 10},              # 1 tbsp blended ginger ≈ 10 g
++    "garlic": {"pcs": 1},             # 1 clove = 1 piece
++    "tomato paste": {"sachet": 0.25},  # a 70 g sachet ≈ 4 tbsp
++    "gari": {"g": 150},               # 1 cup ≈ 150 g
++    "plantain": {"pcs": 1},
++}
++
++POT = 14  # soups and stews serve 2 people for a week: 2 x 7 portions
++
++# name, role, portions, keeps (days), prep note, prep hours ahead, method, [(item, qty, unit)]
++TEMPLATES = [
++    # ---- the soups and stews: one big pot for the week ----
++    ("Light soup", "soup", POT, 7, "Season the goat meat", 3,
++     "Season and steam the goat meat with onion, ginger and garlic. Boil tomatoes, pepper, onion and garden eggs, "
++     "blend, sieve into the meat and simmer 30 minutes.",
++     [("Goat meat", 1.5, "kg"), ("Tomatoes", 10, "pcs"), ("Onions", 3, "pcs"), ("Pepper", 6, "pcs"),
++      ("Garden eggs", 6, "pcs"), ("Ginger", 2, "tbsp"), ("Garlic", 6, "clove"), ("Sankofa Soup Seasoning", 3, "tsp")]),
++    ("Groundnut soup", "soup", POT, 7, "Season the chicken", 3,
++     "Steam the seasoned chicken. Loosen the groundnut paste with water and cook until the oil rises. Add blended "
++     "tomatoes, onion and pepper, then the chicken, and simmer until thick.",
++     [("Hard chicken", 1.5, "kg"), ("Groundnut paste", 500, "g"), ("Tomatoes", 6, "pcs"), ("Tomato paste", 4, "tbsp"),
++      ("Onions", 3, "pcs"), ("Pepper", 5, "pcs"), ("Ginger", 2, "tbsp"), ("Garlic", 4, "clove"),
++      ("Sankofa Chicken", 3, "tsp")]),
++    ("Palm nut soup", "soup", POT, 7, None, None,
++     "Steam the beef with onion. Stir the palm nut cream into water and boil. Add blended tomatoes, pepper and "
++     "garden eggs, then the beef, crabs and fish, and simmer until the oil rises.",
++     [("Palm nut cream", 800, "g"), ("Beef", 1, "kg"), ("Smoked mackerel", 2, "pcs"), ("Crabs", 6, "pcs"),
++      ("Tomatoes", 5, "pcs"), ("Onions", 3, "pcs"), ("Pepper", 5, "pcs"), ("Garden eggs", 6, "pcs"),
++      ("Sankofa Soup Seasoning", 3, "tsp")]),
++    ("Okra soup", "soup", POT, 7, None, None,
++     "Steam the beef. Fry onion, tomatoes and pepper in palm oil, add the meat stock, crabs and fish, then the "
++     "chopped okro, and cook 10 minutes.",
++     [("Okro", 30, "pcs"), ("Beef", 1, "kg"), ("Smoked mackerel", 2, "pcs"), ("Crabs", 6, "pcs"),
++      ("Palm oil", 150, "ml"), ("Tomatoes", 5, "pcs"), ("Onions", 2, "pcs"), ("Pepper", 5, "pcs"),
++      ("Sankofa Fish", 2, "tsp")]),
++    ("Tomato stew", "stew", POT, 7, "Season the beef", 3,
++     "Season and brown the beef. Fry sliced onions in the oil, add the paste, then blended tomatoes, pepper, ginger "
++     "and garlic. Cook down until the oil rises, then add the beef.",
++     [("Beef", 1, "kg"), ("Tomatoes", 15, "pcs"), ("Tomato paste", 8, "tbsp"), ("Onions", 4, "pcs"),
++      ("Vegetable oil", 400, "ml"), ("Pepper", 4, "pcs"), ("Ginger", 2, "tbsp"), ("Garlic", 6, "clove"),
++      ("Sankofa Stew & Gravy", 4, "tsp")]),
++    ("Kontomire stew", "stew", POT, 7, None, None,
++     "Boil and chop the kontomire. Fry onions and tomatoes in palm oil, add pepper, the flaked fish and kontomire, "
++     "then stir in beaten eggs.",
++     [("Kontomire", 4, "bunch"), ("Palm oil", 250, "ml"), ("Onions", 3, "pcs"), ("Tomatoes", 6, "pcs"),
++      ("Pepper", 4, "pcs"), ("Smoked mackerel", 3, "pcs"), ("Eggs", 6, "pcs"), ("Sankofa Fish", 2, "tsp")]),
++    # ---- the starches: cooked fresh for each meal, for 2 people ----
++    ("Kokonte", "starch", 2, 1, None, None,
++     "Stir the powder into boiling water a little at a time, then turn firmly until smooth.",
++     [("Kokonte powder", 1.5, "cup")]),
++    ("Fufu", "starch", 2, 1, None, None,
++     "Boil peeled cassava and green plantain until soft, then pound together until smooth and stretchy.",
++     [("Cassava", 1, "kg"), ("Plantain", 2, "finger")]),
++    ("Banku", "starch", 2, 1, None, None,
++     "Mix both doughs with water and a pinch of salt, then cook, turning all the time, until firm and smooth.",
++     [("Fermented corn dough", 1.5, "cup"), ("Fermented cassava dough", 0.5, "cup")]),
++    ("Plain rice", "starch", 2, 2, None, None, "Wash the rice and steam it with salted water until done.",
++     [("A55 Gold jasmine rice (5kg)", 1.5, "cup")]),
++    ("Waakye", "starch", 2, 2, "Soak the beans", 10,
++     "Boil the soaked beans with waakye leaves until half soft, add the washed rice and cook until done.",
++     [("A55 Gold jasmine rice (5kg)", 1, "cup"), ("Black-eyed peas (beans)", 0.5, "cup")]),
++    ("Boiled yam", "starch", 2, 1, None, None, "Peel the slices and boil in salted water until soft.",
++     [("Yam", 4, "slice")]),
++    ("Boiled plantain", "starch", 2, 1, None, None, "Peel and boil the plantain until soft.",
++     [("Plantain", 3, "finger")]),
++]
++
++# name, [dishes], side item eaten with it (item, amount per person, unit) or None
++PAIRINGS = [
++    ("Kokonte + Palm nut soup", ["Kokonte", "Palm nut soup"], None),
++    ("Kokonte + Groundnut soup", ["Kokonte", "Groundnut soup"], None),
++    ("Fufu + Light soup", ["Fufu", "Light soup"], None),
++    ("Fufu + Palm nut soup", ["Fufu", "Palm nut soup"], None),
++    ("Fufu + Groundnut soup", ["Fufu", "Groundnut soup"], None),
++    ("Banku + Okra soup", ["Banku", "Okra soup"], None),
++    ("Banku + Light soup", ["Banku", "Light soup"], None),
++    ("Waakye + Stew + Gari", ["Waakye", "Tomato stew"], ("Gari", 0.5, "cup")),
++    ("Plain rice + Tomato stew", ["Plain rice", "Tomato stew"], None),
++    ("Boiled yam + Kontomire stew", ["Boiled yam", "Kontomire stew"], None),
++    ("Boiled plantain + Kontomire stew", ["Boiled plantain", "Kontomire stew"], None),
++]
++
++
++def _pack_info(unit, pack, size, alt_units):
++    """(pack size in base units, {other unit: base units}) from sizes given in the item's own unit."""
++    one = to_base(1, unit)[0]
++    pack_base = float(size) * one if pack and size else None
++    alts = {u: round(float(v) * one, 6) for u, v in (alt_units or {}).items()} or None
++    return pack_base, alts
++
++
++def _items(cur):
++    """{lower-case name: (id, unit, pack_name, pack_size, alt_units)} for every ingredient."""
++    cur.execute("SELECT id, name, unit, pack_name, pack_size, alt_units FROM meals.ingredients")
++    return {n.lower(): (i, u, pn, ps, au) for i, n, u, pn, ps, au in cur.fetchall()}
++
++
++def line_amount(item, qty, unit):
++    """A recipe line in the unit the item is actually kept in: (qty, unit), or None if it can't be converted.
++    item: (id, unit, pack_name, pack_size, alt_units) as _items() returns it, plus the item's name."""
++    _, have_unit, pack_name, pack_size, alt_units = item[:5]
++    name = item[5] if len(item) > 5 else ""
++    if base_of(unit) == base_of(have_unit) or unit == pack_name or unit in (alt_units or {}):
++        return qty, unit
++    per = EQUIV.get(name.lower(), {}).get(base_of(have_unit))
++    if per is None:
++        return None
++    base = base_of(have_unit)
++    return round(float(qty) * per, 3), (have_unit if base_of(have_unit) == have_unit else base)
++
++
++def add_items(cur, rows, expense_categories):
++    """Add catalog rows, reusing items that already exist by name. Returns {name: item tuple}."""
++    fallback = "Staples" if "Staples" in expense_categories else (expense_categories[0] if expense_categories else None)
++    have = _items(cur)
++    out = {}
++    for section, name, unit, cat, pack, size, loose, alt_units in rows:
++        pack_base, alts = _pack_info(unit, pack, size, alt_units)
++        found = have.get(name.lower())
++        if found:
++            iid, have_unit, have_pack, _, _ = found
++            same = base_of(have_unit) == base_of(unit)
++            if same and not have_pack and pack:
++                cur.execute("UPDATE meals.ingredients SET pack_name = %s, pack_size = %s, loose = %s, alt_units = %s "
++                            "WHERE id = %s", (pack, pack_base, loose, json.dumps(alts) if alts else None, iid))
++            elif same and alts and have_pack == pack:
++                cur.execute("UPDATE meals.ingredients SET alt_units = COALESCE(alt_units, %s), loose = loose OR %s "
++                            "WHERE id = %s", (json.dumps(alts), loose, iid))
++            cur.execute("UPDATE meals.ingredients SET section = COALESCE(section, %s) WHERE id = %s", (section, iid))
++        else:
++            cur.execute("INSERT INTO meals.ingredients (name, unit, category, pack_name, pack_size, loose, alt_units, "
++                        "section) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
++                        (name, unit, cat if cat in expense_categories else fallback, pack, pack_base, loose,
++                         json.dumps(alts) if alts else None, section))
++            iid = cur.fetchone()[0]
++    have = _items(cur)
++    for row in rows:
++        out[row[1]] = have[row[1].lower()] + (row[1],)
++    return out
++
++
++def add_recipes(cur, recipes, with_role=True):
++    """Add recipes by name (skipping names already used). Lines whose item is missing or can't be converted are
++    left out. Returns how many recipes were added."""
++    items = {k: v + (k,) for k, v in _items(cur).items()}
++    cur.execute("SELECT lower(name) FROM meals.recipes")
++    taken = {r[0] for r in cur.fetchall()}
++    added = 0
++    for rec in recipes:
++        if with_role:
++            name, role, portions, keeps, note, hours, method, lines = rec
++        else:
++            (name, portions, keeps, note, hours, method, lines), role = rec, "main"
++        if name.lower() in taken:
++            continue
++        cur.execute("INSERT INTO meals.recipes (name, portions, keeps_days, prep_note, prep_hours, method, role) "
++                    "VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id", (name, portions, keeps, note, hours, method, role))
++        rid = cur.fetchone()[0]
++        for item, qty, unit in lines:
++            found = items.get(item.lower())
++            amount = line_amount(found, qty, unit) if found else None
++            if amount:
++                cur.execute("INSERT INTO meals.recipe_items (recipe_id, ingredient_id, qty, unit) VALUES (%s, %s, %s, %s)",
++                            (rid, found[0], amount[0], amount[1]))
++        taken.add(name.lower())
++        added += 1
++    return added
++
++
++def add_pairings(cur, pairings=PAIRINGS):
++    items = {k: v + (k,) for k, v in _items(cur).items()}
++    cur.execute("SELECT lower(name), id FROM meals.recipes")
++    recipes = dict(cur.fetchall())
++    cur.execute("SELECT lower(name) FROM meals.pairings")
++    taken = {r[0] for r in cur.fetchall()}
++    added = 0
++    for name, dishes, side in pairings:
++        ids = [recipes.get(d.lower()) for d in dishes]
++        if name.lower() in taken or None in ids:
++            continue
++        cur.execute("INSERT INTO meals.pairings (name) VALUES (%s) RETURNING id", (name,))
++        pid = cur.fetchone()[0]
++        for rid in ids:
++            cur.execute("INSERT INTO meals.pairing_items (pairing_id, recipe_id) VALUES (%s, %s)", (pid, rid))
++        if side:
++            found = items.get(side[0].lower())
++            amount = line_amount(found, side[1], side[2]) if found else None
++            if amount:
++                cur.execute("INSERT INTO meals.pairing_items (pairing_id, ingredient_id, qty, unit) VALUES (%s, %s, %s, %s)",
++                            (pid, found[0], amount[0], amount[1]))
++        added += 1
++    return added
++
++
++def seed(cur):
++    """Add the catalog, templates and pairings to this database, once."""
++    cur.execute("SELECT 1 FROM app_meta WHERE key = %s", (FLAG,))
++    if cur.fetchone():
++        return False
++    cur.execute("SELECT name FROM categories WHERE kind = 'Expense' ORDER BY id")
++    expense = [r[0] for r in cur.fetchall()]
++    add_items(cur, CATALOG, expense)
++    add_recipes(cur, TEMPLATES)
++    add_pairings(cur)
++    cur.execute("INSERT INTO app_meta (key, value) VALUES (%s, 'yes') ON CONFLICT (key) DO NOTHING", (FLAG,))
++    return True
+diff --git a/meals/data.py b/meals/data.py
+index 4868b30..5800954 100644
+--- a/meals/data.py
++++ b/meals/data.py
+@@ -10,54 +10,80 @@ import pandas as pd
+ import streamlit as st
+ 
+ from core.db import transact
+-from meals.logic import OPEN, allocate, reminders
++from meals.logic import OPEN, ROLE_ORDER, allocate, reminders
+ from meals.units import base_of
+ 
+ TTL = int(os.environ.get("CASHEW_CACHE_SECONDS", "60"))  # tests shorten this
+ HOUSEHOLD_KEY = "meals_household"
+ 
++# Every table the kitchen screens need, as (columns, query). They all come back in ONE round trip (as JSON),
++# instead of one trip per table: on a distant database each trip costs ~0.1-0.2 s.
+ QUERIES = {
+-    "ingredients": "SELECT id, name, unit, category, low_level, pack_name, pack_size, kind FROM meals.ingredients "
+-                   "ORDER BY lower(name)",
+-    "recipes": "SELECT id, name, portions, keeps_days, prep_note, prep_hours, method, bought, price, count_unit, shop, "
+-               "category FROM meals.recipes ORDER BY lower(name)",
+-    "items": "SELECT id, recipe_id, ingredient_id, qty, unit FROM meals.recipe_items ORDER BY id",
++    "ingredients": (["id", "name", "unit", "category", "low_level", "pack_name", "pack_size", "kind", "loose",
++                     "alt_units", "section"],
++                    "SELECT id, name, unit, category, low_level, pack_name, pack_size, kind, loose, alt_units, section "
++                    "FROM meals.ingredients ORDER BY lower(name)"),
++    "recipes": (["id", "name", "portions", "keeps_days", "prep_note", "prep_hours", "method", "bought", "price",
++                 "count_unit", "shop", "category", "role"],
++                "SELECT id, name, portions, keeps_days, prep_note, prep_hours, method, bought, price, count_unit, shop, "
++                "category, role FROM meals.recipes ORDER BY lower(name)"),
++    "items": (["id", "recipe_id", "ingredient_id", "qty", "unit"],
++              "SELECT id, recipe_id, ingredient_id, qty, unit FROM meals.recipe_items ORDER BY id"),
++    "pairings": (["id", "name"], "SELECT id, name FROM meals.pairings ORDER BY lower(name)"),
++    "pairing_items": (["id", "pairing_id", "recipe_id", "ingredient_id", "qty", "unit"],
++                      "SELECT id, pairing_id, recipe_id, ingredient_id, qty, unit FROM meals.pairing_items ORDER BY id"),
+     # a window around this week is all the screens need
+-    "plan": "SELECT id, day, slot, recipe_id, ingredient_id, qty, unit, status, done_at, done_by, label, price "
+-            "FROM meals.plan "
+-            "WHERE day BETWEEN CURRENT_DATE - 40 AND CURRENT_DATE + 63 ORDER BY day, id",
+-    "fridge": "SELECT id, recipe_id, label, portions, cooked_on, eat_by, plan_id, unit FROM meals.fridge "
+-              "WHERE portions > 0 ORDER BY eat_by, id",
+-    "pantry": "SELECT ingredient_id, unit, qty, updated_at FROM meals.pantry",
+-    "prices": "SELECT ingredient_id, unit, per_unit FROM meals.prices",
+-    "trips": "SELECT t.id, t.date, t.account, t.total, t.created_by, t.shop, count(i.id) AS items "
+-             "FROM meals.trips t LEFT JOIN meals.trip_items i ON i.trip_id = t.id "
+-             "GROUP BY t.id ORDER BY t.date DESC, t.id DESC LIMIT 20",
+-    "settings": "SELECT key, value FROM app_meta WHERE key LIKE 'meals_%' OR key = 'feature_fun'",
++    "plan": (["id", "day", "slot", "recipe_id", "ingredient_id", "qty", "unit", "status", "done_at", "done_by", "label",
++              "price"],
++             "SELECT id, day, slot, recipe_id, ingredient_id, qty, unit, status, done_at, done_by, label, price "
++             "FROM meals.plan WHERE day BETWEEN CURRENT_DATE - 40 AND CURRENT_DATE + 63 ORDER BY day, id"),
++    "fridge": (["id", "recipe_id", "label", "portions", "cooked_on", "eat_by", "plan_id", "unit"],
++               "SELECT id, recipe_id, label, portions, cooked_on, eat_by, plan_id, unit FROM meals.fridge "
++               "WHERE portions > 0 ORDER BY eat_by, id"),
++    "pantry": (["ingredient_id", "unit", "qty", "updated_at"],
++               "SELECT ingredient_id, unit, qty, updated_at FROM meals.pantry"),
++    "prices": (["ingredient_id", "unit", "per_unit"], "SELECT ingredient_id, unit, per_unit FROM meals.prices"),
++    "trips": (["id", "date", "account", "total", "created_by", "shop", "items"],
++              "SELECT t.id, t.date, t.account, t.total, t.created_by, t.shop, count(i.id) AS items "
++              "FROM meals.trips t LEFT JOIN meals.trip_items i ON i.trip_id = t.id "
++              "GROUP BY t.id ORDER BY t.date DESC, t.id DESC LIMIT 20"),
++    "settings": (["key", "value"], "SELECT key, value FROM app_meta WHERE key LIKE 'meals_%' OR key = 'feature_fun'"),
+     # what each item cost per base unit on every trip in the last year, and where (for price trends)
+-    "history": "SELECT i.ingredient_id, i.unit, i.qty, i.price, t.date, t.shop FROM meals.trip_items i "
+-               "JOIN meals.trips t ON t.id = i.trip_id WHERE t.date >= CURRENT_DATE - 400 AND i.qty > 0 "
+-               "AND i.ingredient_id IS NOT NULL ORDER BY t.date",
++    "history": (["ingredient_id", "unit", "qty", "price", "date", "shop"],
++                "SELECT i.ingredient_id, i.unit, i.qty, i.price, t.date, t.shop FROM meals.trip_items i "
++                "JOIN meals.trips t ON t.id = i.trip_id WHERE t.date >= CURRENT_DATE - 400 AND i.qty > 0 "
++                "AND i.ingredient_id IS NOT NULL ORDER BY t.date, t.id, i.id"),
+     # what was paid for bought food (kenkey, waakye…) on each day, for price trends
+-    "bought": "SELECT date, recipe_id, label, qty, unit, paid, shop FROM meals.bought "
+-              "WHERE date >= CURRENT_DATE - 400 AND qty > 0 ORDER BY date",
+-    "waste": "SELECT id, date, label, amount, unit, value, recipe_id FROM meals.waste "
+-             "WHERE date >= CURRENT_DATE - 400 ORDER BY date DESC, id DESC",
++    "bought": (["date", "recipe_id", "label", "qty", "unit", "paid", "shop"],
++               "SELECT date, recipe_id, label, qty, unit, paid, shop FROM meals.bought "
++               "WHERE date >= CURRENT_DATE - 400 AND qty > 0 ORDER BY date, id"),
++    "waste": (["id", "date", "label", "amount", "unit", "value", "recipe_id"],
++              "SELECT id, date, label, amount, unit, value, recipe_id FROM meals.waste "
++              "WHERE date >= CURRENT_DATE - 400 ORDER BY date DESC, id DESC"),
+ }
++# json_agg keeps each query's ORDER BY because it aggregates the ordered subquery as it comes
++SQL = "SELECT " + ", ".join(
++    f"(SELECT COALESCE(json_agg(t), '[]'::json) FROM ({sql}) t) AS {name}" for name, (_, sql) in QUERIES.items())
++DATES = {"plan": ["day"], "fridge": ["cooked_on", "eat_by"], "trips": ["date"], "history": ["date"],
++         "bought": ["date"], "waste": ["date"]}
+ 
+ 
+ def _load(conn):
+-    out = {}
+     with conn.cursor() as cur:
+-        for name, sql in QUERIES.items():
+-            cur.execute(sql)
+-            out[name] = pd.DataFrame(cur.fetchall(), columns=[c[0] for c in cur.description])
++        cur.execute(SQL)
++        row = cur.fetchone()
++    out = {}
++    for (name, (cols, _)), records in zip(QUERIES.items(), row):
++        df = pd.DataFrame(records or [], columns=cols)
++        for c in DATES.get(name, []):
++            df[c] = [date.fromisoformat(str(x)[:10]) if x else None for x in df[c]]
++        out[name] = df
+     return out
+ 
+ 
+ @st.cache_resource(ttl=TTL, show_spinner=False)
+ def load_kitchen():
+-    return Kitchen(transact(_load))
++    return Kitchen(transact(_load, read_only=True))
+ 
+ 
+ def kitchen():
+@@ -88,40 +114,63 @@ class Kitchen:
+         self.food_names = {i: n for i, n in self.names.items() if int(i) not in self.supplies}
+         self.food_categories = {c for i, c in self.category_of.items() if int(i) not in self.supplies}
+         self.supply_categories = {c for i, c in self.category_of.items() if int(i) in self.supplies}
+-        # containers: {ingredient_id: (name, size in base unit, base unit)}
+-        self.packs = {int(i): (pn, float(ps), base_of(u)) for i, u, pn, ps in
+-                      zip(ing["id"], ing["unit"], ing["pack_name"], ing["pack_size"])
++        # containers: {ingredient_id: (name, size in base unit, base unit, sold loose, {other unit: base units})}
++        self.packs = {int(i): (pn, float(ps), base_of(u), bool(lo), au if isinstance(au, dict) else {})
++                      for i, u, pn, ps, lo, au in
++                      zip(ing["id"], ing["unit"], ing["pack_name"], ing["pack_size"], ing["loose"], ing["alt_units"])
+                       if pn and ps is not None and not pd.isna(ps) and float(ps) > 0}
++        self.section_of = {int(i): s for i, s in zip(ing["id"], ing["section"]) if isinstance(s, str) and s}
+         self.recipes = {int(r["id"]): {"name": r["name"], "portions": float(r["portions"]), "keeps_days": int(r["keeps_days"]),
+                                        "prep_note": r["prep_note"], "prep_hours": None if pd.isna(r["prep_hours"])
+                                        else int(r["prep_hours"]), "method": r["method"],
+                                        # bought ready-made: no ingredients, a usual price per unit instead
+                                        "bought": bool(r["bought"]), "price": _f(r["price"]),
+                                        "count_unit": r["count_unit"] or "portion", "shop": r["shop"] or "",
+-                                       "category": r["category"] or ""}
+-                        for _, r in f["recipes"].iterrows()}
++                                       "category": r["category"] or "",
++                                       # starch, soup, stew, sauce, side or main: orders a meal's name
++                                       "role": r["role"] or "main"}
++                        for r in f["recipes"].to_dict("records")}
+         # what bought food is paid under counts as food too (e.g. Dining Out)
+         self.food_categories |= {r["category"] for r in self.recipes.values() if r["bought"] and r["category"]}
+         items = defaultdict(list)
+-        for _, r in f["items"].iterrows():
+-            items[int(r["recipe_id"])].append((int(r["ingredient_id"]), float(r["qty"]), r["unit"]))
++        for rid, iid, qty, unit in zip(f["items"]["recipe_id"], f["items"]["ingredient_id"], f["items"]["qty"],
++                                       f["items"]["unit"]):
++            items[int(rid)].append((int(iid), float(qty), unit))
+         self.items = dict(items)
++        # ready-made pairings: {id: {"name", "parts": [{"recipe_id"} or {"ingredient_id", "qty" per person, "unit"}]}}
++        self.pairings = {int(i): {"name": n, "parts": []} for i, n in zip(f["pairings"]["id"], f["pairings"]["name"])}
++        for r in f["pairing_items"].to_dict("records"):
++            p = self.pairings.get(int(r["pairing_id"]))
++            if p is None:
++                continue
++            if r["recipe_id"] is not None and not pd.isna(r["recipe_id"]) and int(r["recipe_id"]) in self.recipes:
++                p["parts"].append({"recipe_id": int(r["recipe_id"])})
++            elif r["ingredient_id"] is not None and not pd.isna(r["ingredient_id"]) and int(r["ingredient_id"]) in self.names:
++                p["parts"].append({"ingredient_id": int(r["ingredient_id"]), "qty": _f(r["qty"]) or 1.0,
++                                   "unit": r["unit"] or self.unit_of.get(int(r["ingredient_id"]), "pcs")})
++        self.pairings = {i: p for i, p in self.pairings.items() if p["parts"]}
+         self.plan = [
+             {"id": int(r["id"]), "day": r["day"], "slot": r["slot"],
+              "recipe_id": None if pd.isna(r["recipe_id"]) else int(r["recipe_id"]),
+              "ingredient_id": None if pd.isna(r["ingredient_id"]) else int(r["ingredient_id"]),
+              "qty": float(r["qty"]), "unit": r["unit"], "status": r["status"], "done_by": r["done_by"],
+              "label": r["label"], "price": _f(r["price"])}
+-            for _, r in f["plan"].iterrows()]
++            for r in f["plan"].to_dict("records")]
++        self.plan.sort(key=lambda e: (e["day"], e["id"]))
++        self._by_day = defaultdict(list)  # day -> its entries, so each day card doesn't scan the whole plan
++        for e in self.plan:
++            self._by_day[e["day"]].append(e)
+         self.fridge = [
+             {"id": int(r["id"]), "recipe_id": None if pd.isna(r["recipe_id"]) else int(r["recipe_id"]),
+              "label": r["label"], "portions": float(r["portions"]), "cooked_on": r["cooked_on"], "eat_by": r["eat_by"],
+              "unit": r["unit"] or "portion"}
+-            for _, r in f["fridge"].iterrows()]
+-        self.pantry = {(int(r["ingredient_id"]), r["unit"]): float(r["qty"]) for _, r in f["pantry"].iterrows()}
+-        self.prices = {(int(r["ingredient_id"]), r["unit"]): float(r["per_unit"]) for _, r in f["prices"].iterrows()}
+-        self.low_levels = {(int(r["id"]), base_of(r["unit"])): _f(r["low_level"])
+-                           for _, r in ing.iterrows() if _f(r["low_level"]) is not None}
++            for r in f["fridge"].to_dict("records")]
++        self.fridge.sort(key=lambda b: (b["eat_by"], b["id"]))
++        pan, pri = f["pantry"], f["prices"]
++        self.pantry = {(int(i), u): float(q) for i, u, q in zip(pan["ingredient_id"], pan["unit"], pan["qty"])}
++        self.prices = {(int(i), u): float(p) for i, u, p in zip(pri["ingredient_id"], pri["unit"], pri["per_unit"])}
++        self.low_levels = {(int(i), base_of(u)): _f(lv) for i, u, lv in zip(ing["id"], ing["unit"], ing["low_level"])
++                           if _f(lv) is not None}
+         self.trips = f["trips"]
+         h = f["history"]
+         if len(h):
+@@ -164,7 +213,7 @@ class Kitchen:
+         food_low = {key: v for key, v in self.low_levels.items() if key[0] not in self.supplies}
+         return reminders(now, self.entries(today, today + timedelta(days=1)), self.recipes, self.items, self.pantry,
+                          self.fridge, self.names, self.household, packs=self.packs, alloc=self.allocation(today),
+-                         fun=self.fun, low_levels=food_low)
++                         fun=self.fun, low_levels=food_low, usual=self.unit_of)
+ 
+     def supplies_low(self):
+         """Household supplies at or below their warning level (or out), by name."""
+@@ -188,7 +237,51 @@ class Kitchen:
+     # ---- the plan --------------------------------------------------------------
+     def entries(self, start, end=None):
+         end = end or start
+-        return [e for e in self.plan if start <= e["day"] <= end]
++        if (end - start).days > 120:
++            return [e for e in self.plan if start <= e["day"] <= end]
++        out = []
++        d = start
++        while d <= end:
++            out += self._by_day.get(d, [])
++            d += timedelta(days=1)
++        return out
++
++    # ---- meals: everything planned for one day's breakfast, lunch or supper is ONE meal ---------------
++    # "Kokonte + Palm nut soup" is one lunch, not two dishes: it's ticked off, counted, named and paid for
++    # as one meal, while the stock and fridge still work dish by dish (the soup can come from the fridge
++    # while the kokonte is cooked fresh).
++    def meal_parts(self, e):
++        """Every entry sharing this entry's day and meal."""
++        return [x for x in self._by_day.get(e["day"], []) if x["slot"] == e["slot"]]
++
++    @staticmethod
++    def group_meals(entries):
++        """Entries grouped into meals (lists of entries), in the order they come."""
++        groups = {}
++        for e in entries:
++            groups.setdefault((e["day"], e["slot"]), []).append(e)
++        return list(groups.values())
++
++    def meal_count(self, entries):
++        return len({(e["day"], e["slot"]) for e in entries})
++
++    def _part_order(self, e):
++        if e.get("recipe_id"):
++            role = self.recipes.get(e["recipe_id"], {}).get("role", "main")
++            return ROLE_ORDER.get(role, 2), e.get("id") or 0
++        return (2 if e.get("label") else 4), e.get("id") or 0
++
++    def meal_name(self, parts):
++        """"Kokonte + Palm nut soup": the starch first, then the soup or stew, then sides."""
++        names = []
++        for e in sorted(parts, key=self._part_order):
++            n = self.entry_name(e)
++            if n not in names:
++                names.append(n)
++        return " + ".join(names)
++
++    def meal_name_of(self, e):
++        return self.meal_name(self.meal_parts(e)) if e.get("id") is not None else self.entry_name(e)
+ 
+     def open_entries(self, start, end):
+         return [e for e in self.entries(start, end) if e["status"] == OPEN]
+diff --git a/meals/logic.py b/meals/logic.py
+index 59005e0..db4c0b0 100644
+--- a/meals/logic.py
++++ b/meals/logic.py
+@@ -9,9 +9,13 @@ Everything works on plain data:
+ from collections import defaultdict
+ from datetime import datetime, timedelta
+ 
+-from meals.units import fmt, frac, packs_for, plural, to_base
++from meals.units import fmt, frac, loose, packs_for, plural, to_base
+ 
+ SLOTS = ["Breakfast", "Lunch", "Supper"]
++# what part a dish plays in a meal; a meal's name puts the starch first: "Banku + Okra soup"
++ROLES = {"starch": "Starch (kokonte, fufu, banku, rice, yam…)", "soup": "Soup", "stew": "Stew",
++         "sauce": "Sauce", "main": "Complete dish", "side": "Side"}
++ROLE_ORDER = {"starch": 0, "soup": 1, "stew": 1, "sauce": 1, "main": 2, "side": 3}
+ MEAL_HOUR = {"Breakfast": 7, "Lunch": 13, "Supper": 19}
+ OPEN = "planned"
+ 
+@@ -117,7 +121,7 @@ def shopping_list(needs, pantry, low_levels=None, prices=None, packs=None):
+                         "reason": "Running low", "low": True})
+     for r in out:
+         pack = packs.get(r["ingredient_id"])
+-        if pack and pack[2] == r["base"] and pack[1]:
++        if pack and pack[2] == r["base"] and pack[1] and not loose(pack):  # onions are bought by the piece
+             r["packs"], r["pack"] = packs_for(r["to_buy"], pack), pack[0]
+             r["buy_qty"] = r["packs"] * float(pack[1])   # what you'll actually bring home
+         else:
+@@ -426,12 +430,13 @@ def meal_time(day, slot):
+ 
+ 
+ def reminders(now, entries, recipes, items, pantry, fridge, names, household, low_portions=1, packs=None,
+-              alloc=None, fun=False, low_levels=None):
++              alloc=None, fun=False, low_levels=None, usual=None):
+     """Things that affect cooking in the next day or so, most urgent first.
+ 
+     entries: plan entries for today and tomorrow. fridge: batches with recipe_id, label, portions, eat_by.
+     names: {ingredient_id: name}. alloc: allocate()'s result, if already worked out.
+     fun: put a joke in front of each reminder (see quips.py). low_levels: {(ing, base): warn level}.
++    usual: {ingredient_id: its own unit}, so rice counted in cups is listed as "3 cups", not "750 ml".
+     Returns [(tone, text)] where tone is 'warn', 'info' or 'ok'.
+     """
+     from meals.quips import with_joke
+@@ -496,7 +501,9 @@ def reminders(now, entries, recipes, items, pantry, fridge, names, household, lo
+             missing[(ing, base)] += q
+     if missing:
+         rows = list(missing.items())
+-        listed = ", ".join(f"{fmt(q, base)} {names.get(ing, '?')}".replace(" pcs", "") for (ing, base), q in rows[:6])
++        usual = usual or {}
++        listed = ", ".join(f"{fmt(q, base, usual.get(ing))} {names.get(ing, '?')}".replace(" pcs", "")
++                           for (ing, base), q in rows[:6])
+         more = f" and {len(rows) - 6} more" if len(rows) > 6 else ""
+         first_item = names.get(rows[0][0][0], "").lower()
+         fields = {k: v for k, v in (("dish", (short_dish or "").lower()), ("item", first_item)) if v}
+@@ -527,3 +534,30 @@ def reminders(now, entries, recipes, items, pantry, fridge, names, household, lo
+             out.append(("info", with_joke("low_stock", text, today, "", fun)))
+     order = {"warn": 0, "info": 1, "ok": 2}
+     return sorted(out, key=lambda x: order[x[0]])
++
++
++# ---- meals made of several dishes ------------------------------------------------------------------
++def from_leftovers(entries, recipes, items, pantry, fridge, household, today, day, slot, recipe_id, packs=None):
++    """Would a dish planned on this day and meal be eaten from leftovers (the fridge, or a bigger pot cooked
++    earlier in the plan)? Used to suggest planning just enough for the people eating, not a whole new pot."""
++    probe = {"id": -1, "day": day, "slot": slot, "recipe_id": recipe_id, "qty": float(household),
++             "status": OPEN}  # plan ids are positive, so -1 never clashes and still sorts with them
++    alloc = allocate(list(entries) + [probe], recipes, items, pantry, fridge, household, today, packs)
++    return alloc["meals"].get(-1, {}).get("status") == "leftovers"
++
++
++def meal_status(parts):
++    """One status for a meal from its dishes' statuses [(status, missing names)]:
++    done when every dish is done; short when any dish is short; leftovers when everything left comes from the
++    fridge; bought when only bought food is left; otherwise ready."""
++    open_ = [(s, m) for s, m in parts if s != "done"]
++    if not open_:
++        return "done"
++    kinds = {s for s, _ in open_}
++    if "short" in kinds:
++        return "short"
++    if kinds == {"leftovers"}:
++        return "leftovers"
++    if kinds == {"bought"}:
++        return "bought"
++    return "ready"
+diff --git a/meals/pages/fridge.py b/meals/pages/fridge.py
+index d063946..371d101 100644
+--- a/meals/pages/fridge.py
++++ b/meals/pages/fridge.py
+@@ -7,7 +7,7 @@ from core.data import money
+ from meals import actions
+ from meals.data import kitchen
+ from meals.logic import fridge_flags, recipe_cost
+-from meals.units import LEFTOVER_UNITS, base_of, fmt, frac, fmt_stock, from_base, plural, to_base
++from meals.units import LEFTOVER_UNITS, base_of, fmt, fmt_stock, frac, from_base, loose, plural, to_base
+ from ui.components import card, empty, esc, field_msg, flash, page_header, pill, section
+ 
+ FLAG = {"past": ("Past eat-by", "out"), "soon": ("Eat soon", "warn"), "low": ("Running low", "warn"),
+@@ -91,14 +91,17 @@ def _pantry(k):
+         unit = usual if base_of(usual) == base else base
+         have = k.pantry.get((ing, base), 0.0)
+         low = k.low_levels.get((ing, base))
+-        status = "Out" if have <= 0 else ("Low" if low is not None and have <= low else "")
++        # an item only counts as "out" once it has been stocked or has a warning level: the catalog's many
++        # never-bought items aren't all "out"
++        tracked = (ing, base) in k.pantry or low is not None
++        status = ("Out" if tracked else "") if have <= 0 else ("Low" if low is not None and have <= low else "")
+         per = k.prices.get((ing, base))
+         rows.append({"Item": k.names.get(ing, "?"), "In stock": round(from_base(have, base, unit), 3), "Unit": unit,
+-                     "On the shelf": fmt_stock(have, base, k.pack(ing)) if have > 0 else "",
++                     "On the shelf": fmt_stock(have, base, k.pack(ing), usual) if have > 0 else "",
+                      "Status": status,
+-                     "Warn at": fmt(low, base) if low is not None else "",
++                     "Warn at": fmt(low, base, usual) if low is not None else "",
+                      "Last price": (f"{money(per * k.pack(ing)[1])} / {k.pack(ing)[0]}" if per and k.pack(ing)
+-                                    and k.pack(ing)[2] == base else
++                                    and k.pack(ing)[2] == base and not loose(k.pack(ing)) else
+                                     f"{money(per * to_base(1, unit)[0])} / {unit}" if per else ""),
+                      "_ing": ing, "_base": base})
+     table = pd.DataFrame(rows)
+diff --git a/meals/pages/household.py b/meals/pages/household.py
+index 6fda408..2c64454 100644
+--- a/meals/pages/household.py
++++ b/meals/pages/household.py
+@@ -78,7 +78,7 @@ def _items(k):
+                 state = pill("Low", "warn")
+             else:
+                 state = ""
+-            shelf = fmt_stock(have, base, k.pack(ing)) if have > 0 else "none"
++            shelf = fmt_stock(have, base, k.pack(ing), k.unit_of.get(ing)) if have > 0 else "none"
+             row = st.container(horizontal=True, vertical_alignment="center", key=f"supply-{ing}")
+             row.html(f'<div style="min-width:0"><div class="rule-name">{esc(k.names.get(ing, "?"))}{state}</div>'
+                      f'<div class="rule-meta">{esc(shelf)}</div></div>', width="stretch")
+diff --git a/meals/pages/plan.py b/meals/pages/plan.py
+index 19d8d80..c450cf8 100644
+--- a/meals/pages/plan.py
++++ b/meals/pages/plan.py
+@@ -7,8 +7,9 @@ from core.data import CURRENCY, money
+ from meals import actions
+ from meals.briefing import entry_status, guard
+ from meals.data import kitchen
+-from meals.logic import (OPEN, SLOTS, bought_cost, cost_of, recipe_cost, repeat_plan, shopping_list, shortfall,
+-                          suggest, total_needs)
++from meals.briefing import meal_state
++from meals.logic import (OPEN, SLOTS, bought_cost, cost_of, from_leftovers, recipe_cost, repeat_plan, shopping_list,
++                          shortfall, suggest, total_needs)
+ from meals.units import fmt, frac, plural, to_base, units_for
+ from meals.widget import today_card
+ from ui.components import card, empty, esc, field_msg, flash, page_header, pill
+@@ -38,13 +39,32 @@ def _toggle(entry_id, kind, status):
+         msg = "Cooked" + (f". {left:g} portion{'s' if left != 1 else ''} put in the fridge." if left else ".")
+         flash(msg, ":material/skillet:")
+         if short:
+-            flash("Not in the pantry, so not taken off: " + actions.describe_short(short, k.names) +
++            flash("Not in the pantry, so not taken off: " + actions.describe_short(short, k.names, k.unit_of) +
+                   ". Update the pantry if you had them.", ":material/warning:")
+     else:
+         actions.mark_done(entry_id)
+         flash("Ticked off", ":material/check:")
+ 
+ 
++def _toggle_meal(ids, done):
++    """The one tick box for a meal of several dishes (Kokonte + Palm nut soup)."""
++    k = kitchen()
++    if done:
++        actions.untick_meal(list(ids))
++        flash("Unticked. The pantry, fridge and any payment are back as they were.", ":material/undo:")
++        return
++    out = actions.mark_meal(list(ids), k.household)
++    bits = []
++    if out["cooked"]:
++        bits.append("cooked " + " and ".join(out["cooked"]))
++    if out["fridge"]:
++        bits.append(" and ".join(out["fridge"]) + " from the fridge")
++    flash(("Ticked off: " + "; ".join(bits) + ".") if bits else "Ticked off.", ":material/skillet:")
++    if out["short"]:
++        flash("Not in the pantry, so not taken off: " + actions.describe_short(out["short"], k.names, k.unit_of) +
++              ". Update the pantry if you had them.", ":material/warning:")
++
++
+ def _from_fridge(entry_id):
+     k = kitchen()
+     missing = actions.mark_from_fridge(entry_id, k.household)
+@@ -52,7 +72,7 @@ def _from_fridge(entry_id):
+ 
+ 
+ def _remove(entry_id):
+-    actions.remove_from_plan(entry_id)
++    actions.remove_from_plan(list(entry_id) if isinstance(entry_id, tuple) else entry_id)
+     flash("Removed from the plan", ":material/delete:")
+ 
+ 
+@@ -62,7 +82,7 @@ def _detail(k, e):
+         return f"{frac(e['qty'])} {plural(unit, e['qty'])}"
+     if e["recipe_id"]:
+         return f"{frac(e['qty'])} {plural('portion', e['qty'])}"
+-    return fmt(*to_base(e["qty"], e["unit"] or "pcs"))  # 1.5 kg, 2½ bunches, ½ crate
++    return fmt(*to_base(e["qty"], e["unit"] or "pcs"), e["unit"])  # 1.5 kg, 2½ bunches, ½ crate, 1 cup
+ 
+ 
+ def _food_category(k, b, e):
+@@ -77,31 +97,38 @@ def _food_category(k, b, e):
+ 
+ @st.dialog("Bought it", width="small")
+ def _pay(entry_id):
+-    """Ticking bought food: what was paid and from which account. It's saved as an expense."""
++    """Ticking bought food: what was paid and from which account. It's saved as one expense, even when a meal
++    has several bought dishes (kenkey and fried fish)."""
+     k, b = kitchen(), money_book()
+-    e = next((x for x in k.plan if x["id"] == entry_id), None)
+-    if not e:
++    ids = list(entry_id) if isinstance(entry_id, tuple) else [entry_id]
++    entries = [e for e in k.plan if e["id"] in ids and e["status"] == OPEN]
++    if not entries:
+         st.rerun()
+-    price, unit = k.bought_price(e)
+-    st.markdown(f"**{k.entry_name(e)}** · {_detail(k, e)}")
+-    paid = st.number_input(f"Paid ({CURRENCY})", min_value=0.0, step=1.0, format="%.2f", key=f"meal_pay_amt_{entry_id}",
+-                           value=round(float(price) * float(e["qty"]), 2) if price else None, placeholder="0.00")
++    expected, known = 0.0, True
++    for e in entries:
++        price, _ = k.bought_price(e)
++        known = known and bool(price)
++        expected += float(price or 0) * float(e["qty"])
++    sig = "_".join(str(i) for i in ids)
++    st.markdown(" + ".join(f"**{k.entry_name(e)}** · {_detail(k, e)}" for e in entries))
++    paid = st.number_input(f"Paid ({CURRENCY})", min_value=0.0, step=1.0, format="%.2f", key=f"meal_pay_amt_{sig}",
++                           value=round(expected, 2) if known and expected else None, placeholder="0.00")
+     accounts = b.account_names
+-    key = f"meal_pay_acct_{entry_id}"
++    key = f"meal_pay_acct_{sig}"
+     if st.session_state.get(key) not in accounts:
+         st.session_state[key] = b.default_account("Expense") if b.default_account("Expense") in accounts else (
+             accounts[0] if accounts else None)
+     st.pills("Paid from", accounts, key=key, required=True)
+     cats = b.category_names("Expense")
+-    default = _food_category(k, b, e)
++    default = _food_category(k, b, entries[0])
+     cat = st.selectbox("Logged under", cats, index=cats.index(default) if default in cats else 0,
+-                       key=f"meal_pay_cat_{entry_id}")
+-    if st.button("Save", type="primary", width="stretch", disabled=not paid, key=f"meal_pay_go_{entry_id}",
++                       key=f"meal_pay_cat_{sig}")
++    if st.button("Save", type="primary", width="stretch", disabled=not paid, key=f"meal_pay_go_{sig}",
+                  icon=":material/check:"):
+-        actions.mark_bought(entry_id, paid, st.session_state.get(key), cat)
+-        flash(f"Saved {money(paid)} for {k.entry_name(e)} under {cat}", ":material/shopping_bag:")
++        actions.mark_bought(ids if len(ids) > 1 else ids[0], paid, st.session_state.get(key), cat)
++        flash(f"Saved {money(paid)} for {k.meal_name(entries)} under {cat}", ":material/shopping_bag:")
+         st.rerun()
+-    st.caption("Saved as an expense, so there's no need to add it again. Untick the dish to take it back out.")
++    st.caption("Saved as one expense, so there's no need to add it again. Untick the meal to take it back out.")
+ 
+ 
+ def _entry_row(k, e, today):
+@@ -142,12 +169,78 @@ def _entry_row(k, e, today):
+                args=(e["id"],), help="Remove from the plan")
+ 
+ 
++def _part_note(k, e, today):
++    """One dish of a meal, in a few words: "Palm nut soup 14 portions (12 into the fridge), from the fridge"."""
++    text = f"{k.entry_name(e)} {_detail(k, e)}"
++    if e["status"] != OPEN:
++        return text + f" ({DONE_LABEL.get(e['status'], 'done').lower()})"
++    if e.get("recipe_id") and not k.is_bought(e):
++        extra = e["qty"] - min(k.household, e["qty"])
++        if extra > 1e-9:
++            text += f" ({frac(extra)} into the fridge)"
++    if e["day"] >= today:
++        status, label = entry_status(k, e, today)
++        text += {"leftovers": " 🥡", "short": f" 🛒 {label}", "bought": " 🛍️"}.get(status, "")
++    return text
++
++
++def _meal_row(k, parts, today):
++    """A meal of several dishes, e.g. Kokonte + Palm nut soup: one line, one tick box, one payment."""
++    home = [e for e in parts if not k.is_bought(e)]
++    bought_open = [e for e in parts if k.is_bought(e) and e["status"] == OPEN]
++    ids = tuple(e["id"] for e in parts)
++    name = k.meal_name(parts)
++    d, slot = parts[0]["day"], parts[0]["slot"]
++    done = all(e["status"] != OPEN for e in parts)
++    home_done = bool(home) and all(e["status"] != OPEN for e in home)
++    row = st.container(horizontal=True, vertical_alignment="center", key=f"meal-combo-{d:%Y%m%d}-{slot}")
++    if d >= today and not done:
++        status, _ = meal_state(k, parts, today)
++        missing = {ing for e in parts for ing, _, _ in (k.meal_status(e["id"], today) or {}).get("missing", [])}
++        tag = {"ready": "✅", "leftovers": "🥡 fridge", "short": f"🛒 {len(missing)} to buy",
++               "bought": "🛍️"}.get(status, "")
++    else:
++        tag = "· Done" if done else ""
++    who = f"{k.household} {'person' if k.household == 1 else 'people'}"
++    if home or done:
++        ticked = home_done if home else done
++        row.checkbox(f"{name} · {who} {tag}".rstrip(), value=ticked,
++                     key=f"meal_c_{'_'.join(map(str, ids))}_{ticked}", on_change=_toggle_meal,
++                     args=(tuple(e["id"] for e in (parts if ticked else home)), ticked), width="stretch",
++                     help="One tick for the whole meal: dishes with leftovers in the fridge come from there, the rest "
++                          "are cooked from the pantry. Untick to undo.")
++    else:
++        row.html(f'<div class="bought-row">{esc(name)} · {esc(who)} <span class="muted">{esc(tag)}</span></div>',
++                 width="stretch")
++    if bought_open:
++        if row.button("Bought", key=f"meal_buy_{'_'.join(str(e['id']) for e in bought_open)}",
++                      icon=":material/shopping_bag:", help="Say what you paid for the bought food; it's one expense"):
++            _pay(tuple(e["id"] for e in bought_open))
++    with row.popover("", icon=":material/tune:", help="The dishes in this meal"):
++        for e in sorted(parts, key=k._part_order):
++            r = st.container(horizontal=True, vertical_alignment="center", key=f"meal-part-{e['id']}")
++            r.markdown(_part_note(k, e, today), width="stretch")
++            r.button("", key=f"meal_rm_part_{e['id']}", type="tertiary", icon=":material/close:", on_click=_remove,
++                     args=(e["id"],), disabled=e["status"] != OPEN, help="Take this dish out of the meal")
++    row.button("", key=f"meal_rm_{'_'.join(map(str, ids))}", type="tertiary", icon=":material/close:", on_click=_remove,
++               args=(ids,), help="Remove the whole meal from the plan")
++    brief = []
++    for e in sorted(parts, key=k._part_order):
++        bit = f"{k.entry_name(e)} {_detail(k, e)}"
++        if e["status"] == OPEN and e["day"] >= today and (k.meal_status(e["id"], today) or {}).get("status") == "leftovers":
++            bit += " from the fridge"
++        brief.append(bit)
++    st.html(f'<div class="meal-parts">{esc(" · ".join(brief))}</div>')
++
++
+ ONE_OFF_UNITS = ["portion", "piece", "ball", "pack", "plate", "bowl", "loaf", "bottle", "sachet"]
+ 
+ 
+ def _option_label(k, key):
+     kind, i = key.split(":")
+     i = int(i)
++    if kind == "p":
++        return f"🍲 {k.pairings[i]['name']}"
+     if kind == "r":
+         return k.recipes[i]["name"] + (" 🛍️" if k.recipes[i]["bought"] else "")
+     return f"{k.names.get(i, '?')} (item)"
+@@ -171,17 +264,34 @@ def _add_form():
+     st.pills("Meal", SLOTS, key="meal_add_slot", required=True)  # tapping the picked one again keeps it
+     day, slot = ss.get("meal_add_day") or days[0], ss.get("meal_add_slot") or "Supper"
+ 
+-    options = ([f"r:{i}" for i in sorted(k.recipes, key=lambda i: k.recipes[i]["name"].lower())]
++    options = ([f"p:{i}" for i in k.pairings]
++               + [f"r:{i}" for i in sorted(k.recipes, key=lambda i: k.recipes[i]["name"].lower())]
+                + [f"i:{i}" for i in sorted(k.food_names, key=lambda i: k.food_names[i].lower())])
+     if not options:
+         field_msg("Add a recipe or an ingredient first, under Meals → Recipes.", "hint")
+         go("meals", "Recipes", label="Open recipes", icon=":material/menu_book:")
+     ver = ss.get("meal_add_ver", 0)  # a fresh form after each add (clearing a widget's value isn't reliable)
+     picked = st.multiselect("Dishes", options, key=f"meal_add_pick_{ver}", format_func=lambda x: _option_label(k, x),
+-                            placeholder="One or more: jollof, kenkey 🛍️, bananas…",
+-                            help="🛍️ means bought ready-made. Add those in Recipes, or type a one-off below.")
+-    lines = []
++                            placeholder="A pairing (🍲 Kokonte + Palm nut soup), dishes, or items…",
++                            help="🍲 is a ready-made pairing; 🛍️ means bought ready-made. Everything picked for one "
++                                 "meal is eaten together as one meal.")
++    # a pairing stands for its dishes; a dish picked twice is planned once
++    expanded, sides = [], {}
+     for key in picked:
++        kind, i = key.split(":")
++        if kind == "p":
++            for part in k.pairings[int(i)]["parts"]:
++                if part.get("recipe_id"):
++                    expanded.append(f"r:{part['recipe_id']}")
++                else:
++                    expanded.append(f"i:{part['ingredient_id']}")
++                    sides[f"i:{part['ingredient_id']}"] = part
++        else:
++            expanded.append(key)
++    expanded = list(dict.fromkeys(expanded))
++    planned_here = [e for e in k.entries(day) if e["slot"] == slot]
++    lines = []
++    for key in expanded:
+         kind, i = key.split(":")
+         i = int(i)
+         name = _option_label(k, key).replace(" 🛍️", "").replace(" (item)", "")
+@@ -195,27 +305,45 @@ def _add_form():
+                           + ".", "hint")
+             lines.append(dict(recipe_id=i, qty=qty))
+         elif kind == "r":
++            r = k.recipes[i]
++            # the week's soup is already in the fridge (or a big pot is planned earlier): plan just enough for
++            # this meal; otherwise the whole pot, and what isn't eaten goes into the fridge
++            leftover = r["role"] != "starch" and from_leftovers(
++                k.open_entries(*k.window(today)), k.recipes, k.items, k.pantry, k.fridge, k.household, today, day,
++                slot, i, k.packs)
++            if r["role"] == "starch":  # cooked fresh for everyone eating
++                default = float(k.household)
++            elif leftover:
++                default = float(min(k.household, r["portions"]))
++            else:
++                default = float(r["portions"])
+             qty = st.number_input(f"{name} (portions to cook)", min_value=0.25, max_value=100.0, step=0.5, format="%g",
+-                                  value=float(k.recipes[i]["portions"]), key=f"meal_add_q_{ver}_{key}",
++                                  value=default, key=f"meal_add_q_{ver}_{key}",
+                                   help="Halves and quarters are fine: 2.5, 0.5…")
+-            have = k.fridge_portions(i)
+             left = qty - min(k.household, qty)
+             notes = []
+-            batch, each, unknown = recipe_cost(i, k.recipes, k.items, k.prices, k.packs)
+-            if batch:
+-                notes.append(f"{'at least' if unknown else 'about'} {money(each * qty)}")
+-            if have:
+-                notes.append(f"{frac(have)} already in the fridge")
+-            if left > 0:
+-                notes.append(f"{frac(left)} {plural('portion', left)} will go into the fridge")
++            if leftover and qty <= k.household:
++                notes.append("comes from the leftovers in the fridge, no need to cook")
++            else:
++                batch, each, unknown = recipe_cost(i, k.recipes, k.items, k.prices, k.packs)
++                if batch:
++                    notes.append(f"{'at least' if unknown else 'about'} {money(each * qty)}")
++                have = k.fridge_portions(i)
++                if have:
++                    notes.append(f"{frac(have)} already in the fridge")
++                if left > 0:
++                    notes.append(f"{frac(left)} {plural('portion', left)} will go into the fridge")
+             if notes:
+                 field_msg(notes[0][0].upper() + "; ".join(notes)[1:] + ".", "hint")
+             lines.append(dict(recipe_id=i, qty=qty))
+         else:
+-            c1, c2 = st.columns(2)
+-            qty = c1.number_input(f"{name} (how much)", min_value=0.0, value=1.0, step=0.5, format="%g",
+-                                  key=f"meal_add_q_{ver}_{key}")
++            side = sides.get(key)
+             units = units_for(k.unit_of[i], k.pack(i))
++            c1, c2 = st.columns(2)
++            qty = c1.number_input(f"{name} (how much)", min_value=0.0, step=0.5, format="%g",
++                                  value=float(side["qty"]) * k.household if side else 1.0, key=f"meal_add_q_{ver}_{key}")
++            if side and side["unit"] in units and f"meal_add_u_{ver}_{key}" not in ss:
++                ss[f"meal_add_u_{ver}_{key}"] = side["unit"]
+             unit = c2.selectbox(f"{name} unit", units, key=f"meal_add_u_{ver}_{key}", label_visibility="collapsed")
+             if qty:
+                 lines.append(dict(ingredient_id=i, qty=qty, unit=unit))
+@@ -234,6 +362,11 @@ def _add_form():
+ 
+     when = "today" if day == today else ("tomorrow" if day == today + timedelta(days=1) else f"{day:%a %d}")
+     n = len(lines)
++    if lines:  # everything in one breakfast, lunch or supper is one meal
++        meal = planned_here + [dict(ln, day=day, slot=slot, id=None) for ln in lines]
++        if len(meal) > 1:
++            joins = f" (with what's already planned for {when}'s {slot.lower()})" if planned_here else ""
++            field_msg(f"One meal: {k.meal_name(meal)}{joins}.", "hint")
+     label = f"Add {n} to {when}, {slot.lower()}" if n > 1 else f"Add to {when}, {slot.lower()}"
+     if st.button(label, type="primary", disabled=not n, width="stretch", key="meal_add_go", icon=":material/add:"):
+         actions.add_many([{"day": day, "slot": slot, "recipe_id": ln.get("recipe_id"),
+@@ -269,7 +402,7 @@ def render():
+         monday = today - timedelta(days=today.weekday())
+         past = [monday + timedelta(days=i) for i in range(today.weekday())]
+         if past and k.entries(past[0], past[-1]):  # earlier this week folds away, so today is at the top
+-            n = len(k.entries(past[0], past[-1]))
++            n = k.meal_count(k.entries(past[0], past[-1]))
+             with st.expander(f"Earlier this week ({past[0]:%a} to {past[-1]:%a}, {n} meal{'s' if n != 1 else ''})",
+                              icon=":material/history:"):
+                 for d in past:
+@@ -280,7 +413,7 @@ def render():
+             weeks.setdefault(d - timedelta(days=d.weekday()), []).append(d)
+         for i, (wk, wdays) in enumerate(weeks.items()):
+             name = "This week" if wk == monday else ("Next week" if wk == monday + timedelta(days=7) else "Week after")
+-            n = len([e for e in k.entries(wdays[0], wdays[-1])])
++            n = k.meal_count(k.entries(wdays[0], wdays[-1]))  # kokonte + soup is one meal
+             head = f"{name} · {wdays[0]:%a %d} to {wdays[-1]:%a %d %b} · {n} meal{'s' if n != 1 else ''}"
+             if i == 0:
+                 st.html(f'<div class="week-head">{esc(head)}</div>')
+@@ -303,7 +436,7 @@ def _copy_offer(k, today):
+     new = repeat_plan(k.plan, today, k.HORIZON)
+     if not new:
+         return
+-    n = len(new)
++    n = k.meal_count(new)
+     first_time = not k.entries(start, end)
+     label = (f"Copy the week before ({n} meal{'s' if n != 1 else ''})" if first_time else
+              f"Fill the empty meals from the week before ({n})")
+@@ -311,8 +444,8 @@ def _copy_offer(k, today):
+                  type="primary" if first_time else "secondary",
+                  help="Each empty breakfast, lunch or supper in the next two weeks gets what was planned 7 days "
+                       "earlier. Meals already planned stay as they are."):
+-        copied = actions.add_many(new)
+-        flash(f"Copied {copied} meal{'s' if copied != 1 else ''}. Change anything that's different.",
++        actions.add_many(new)
++        flash(f"Copied {n} meal{'s' if n != 1 else ''}. Change anything that's different.",
+               ":material/content_copy:")
+         st.rerun()
+ 
+@@ -331,8 +464,10 @@ def _day_card(k, d, today):
+             if not slot_entries:
+                 continue
+             st.html(f'<div class="meal-slot">{esc(slot)}</div>')
+-            for e in slot_entries:
+-                _entry_row(k, e, today)
++            if len(slot_entries) == 1:
++                _entry_row(k, slot_entries[0], today)
++            else:  # several dishes in one meal: one line, one tick
++                _meal_row(k, slot_entries, today)
+ 
+ 
+ def _cost_line(k, today):
+@@ -348,7 +483,7 @@ def _cost_line(k, today):
+     to_buy = shopping_list(shortfall(k.allocation(today), entries), {}, prices=k.prices, packs=k.packs)
+     buy_cost = sum(r["est"] or 0 for r in to_buy)
+     buy_unknown = sum(1 for r in to_buy if r["est"] is None)
+-    n = len(entries)
++    n = k.meal_count(entries)
+     if not meals_cost and not buy_cost:
+         st.caption("Costs show here once you've saved a shopping trip and Cashew knows your prices.")
+     else:
+@@ -380,7 +515,8 @@ def _suggestions(k, today):
+     if not k.recipes:
+         return
+     recent = [e for e in k.plan if e["day"] >= today - timedelta(days=21)]
+-    home = {i: r for i, r in k.recipes.items() if not r["bought"]}  # ideas are about using up what's at home
++    # ideas are about using up what's at home; a starch on its own isn't a meal idea
++    home = {i: r for i, r in k.recipes.items() if not r["bought"] and r["role"] not in ("starch", "side")}
+     ideas = suggest(home, k.items, k.pantry, k.fridge, recent, today, packs=k.packs)
+     if not ideas:
+         return
+diff --git a/meals/pages/recipes.py b/meals/pages/recipes.py
+index 62616e2..9592414 100644
+--- a/meals/pages/recipes.py
++++ b/meals/pages/recipes.py
+@@ -6,9 +6,11 @@ from core.data import money
+ from core.db import transact
+ from meals import actions
+ from meals.data import invalidate_kitchen, kitchen
++from meals.catalog import SECTIONS
++from meals.logic import ROLES, recipe_cost
++from meals.starter import RECIPES as STARTER_RECIPES
+ from meals.starter import load_starter
+-from meals.logic import recipe_cost
+-from meals.units import CONTAINERS, UNITS, base_of, fmt, frac, from_base, plural, to_base
++from meals.units import CONTAINERS, UNITS, alts, base_of, fmt, frac, from_base, plural, to_base
+ from ui.components import card, confirm, empty, esc, field_msg, flash, page_header, pill, section
+ 
+ NEW = 0
+@@ -28,9 +30,9 @@ def cost_text(k, rid):
+ 
+ def _line(k, ing, qty, unit):
+     pack = k.pack(ing)
+-    if pack and unit == pack[0]:
+-        return f"{qty:g} {plural(unit, qty)} {k.names.get(ing, '?')}"
+-    return f"{fmt(*to_base(qty, unit))} {k.names.get(ing, '?')}"
++    if (pack and unit == pack[0]) or unit in alts(pack):
++        return f"{frac(qty)} {plural(unit, qty)} {k.names.get(ing, '?')}"
++    return f"{fmt(*to_base(qty, unit), unit)} {k.names.get(ing, '?')}"
+ 
+ 
+ def _recipe_card(k, rid):
+@@ -47,7 +49,8 @@ def _recipe_card(k, rid):
+     ings = ", ".join(_line(k, i, q, u) for i, q, u in lines)
+     prep = f'<div class="rule-meta">Ahead: {esc(r["prep_note"])} ({r["prep_hours"]} h before)</div>' \
+         if r["prep_note"] and r["prep_hours"] else ""
+-    return (f'<div class="rule"><div style="min-width:0"><div class="rule-name">{esc(r["name"])}'
++    role = pill(r["role"], "neutral") if r["role"] in ("starch", "soup", "stew", "sauce", "side") else ""
++    return (f'<div class="rule"><div style="min-width:0"><div class="rule-name">{esc(r["name"])}{role}'
+             f'{pill(frac(r["portions"]) + " " + plural("portion", r["portions"]), "neutral")}{pill("keeps " + str(r["keeps_days"]) + " days", "accent")}'
+             f'</div><div class="rule-meta">{esc(ings) or "No ingredients yet"}</div>{prep}</div>'
+             f'<div class="rule-right"><div class="rule-next">{esc(cost_txt)}</div></div></div>')
+@@ -104,7 +107,7 @@ def _editor(k):
+     rid = st.selectbox("Recipe", options, key="meal_recipe_pick",
+                        format_func=lambda i: "＋ New recipe" if i == NEW else k.recipes[i]["name"])
+     r = k.recipes.get(rid, {"name": "", "portions": max(k.household, 1), "keeps_days": 3, "prep_note": "",
+-                            "prep_hours": None, "method": ""})
++                            "prep_hours": None, "method": "", "role": "main"})
+     ver = ss.get(f"meal_recipe_ver_{rid}", 0)
+     pre = f"meal_r{rid}_{ver}_"
+ 
+@@ -119,6 +122,11 @@ def _editor(k):
+     portions = c1.number_input("Portions it makes", min_value=0.5, max_value=100.0, value=float(r["portions"]),
+                                step=0.5, format="%g", key=pre + "portions")
+     keeps = c2.number_input("Keeps in the fridge (days)", 0, 30, int(r["keeps_days"]), key=pre + "keeps")
++    roles = list(ROLES)
++    role = st.selectbox("Kind of dish", roles, index=roles.index(r.get("role", "main")) if r.get("role") in roles else 4,
++                        format_func=ROLES.get, key=pre + "role",
++                        help="A starch (kokonte, fufu, banku…) planned with a soup or stew makes one meal, named "
++                             "starch first: Kokonte + Palm nut soup.")
+     p1, p2 = st.columns([2, 1])
+     prep_note = p1.text_input("Prep ahead (optional)", value=r["prep_note"] or "", key=pre + "prep",
+                               placeholder="e.g. Soak the beans").strip()
+@@ -153,7 +161,7 @@ def _editor(k):
+             continue
+         unit = row["Unit"] if isinstance(row["Unit"], str) and row["Unit"] else k.unit_of[id_of[ing]]
+         pack = k.pack(id_of[ing])
+-        if base_of(unit) != base_of(k.unit_of[id_of[ing]]) and not (pack and unit == pack[0]):
++        if base_of(unit) != base_of(k.unit_of[id_of[ing]]) and not (pack and unit == pack[0]) and unit not in alts(pack):
+             field_msg(f"{ing} is usually counted in {k.unit_of[id_of[ing]]}; {unit} won't add up with it "
+                       "on the shopping list.", "warn")
+         clean.append((id_of[ing], float(qty), unit))
+@@ -168,7 +176,7 @@ def _editor(k):
+     ready = bool(name) and bool(clean) and not problems
+     row = st.container(horizontal=True)
+     if row.button("Save recipe", type="primary", disabled=not ready, icon=":material/check:", key=pre + "save"):
+-        new_id = actions.save_recipe(rid or None, name, portions, keeps, prep_note, prep_hours, method, clean)
++        new_id = actions.save_recipe(rid or None, name, portions, keeps, prep_note, prep_hours, method, clean, role)
+         ss[f"meal_recipe_ver_{rid}"] = ver + 1
+         ss["_meal_recipe_next"] = new_id
+         flash(f"Saved {name}")
+@@ -184,6 +192,12 @@ def _editor(k):
+         field_msg("Add a name and at least one ingredient to save.", "hint")
+ 
+ 
++def _alts_text(k, i, unit):
++    """Other units an item can be measured in, e.g. "container = 80 tsp"."""
++    pack = k.pack(i)
++    return ", ".join(f"{u} = {from_base(v, base_of(unit), unit):g} {plural(unit)}" for u, v in alts(pack).items())
++
++
+ def _ingredients(k):
+     ss = st.session_state
+     cats = _expense_categories()
+@@ -191,21 +205,24 @@ def _ingredients(k):
+         section("Add an ingredient")
+         name = st.text_input("Name", key="meal_ing_name", max_chars=60, placeholder="e.g. Groundnut paste").strip()
+         c1, c2 = st.columns(2)
+-        unit = c1.selectbox("Usually counted in", UNITS, index=UNITS.index("pcs"), key="meal_ing_unit")
++        unit = c1.selectbox("Base unit (counted and used in)", UNITS, index=UNITS.index("pcs"), key="meal_ing_unit",
++                            help="What recipes and the pantry count in: cups of rice, slices of yam, tsp of spice.")
+         default_cat = "Staples" if "Staples" in cats else (cats[0] if cats else None)
+         cat = c2.selectbox("Money category", cats, index=cats.index(default_cat) if default_cat in cats else 0,
+                            key="meal_ing_cat", help="Where its cost is logged when you save a shopping trip.")
+         busy = bool(ss.get("meal_ing_pack") or ss.get("meal_ing_low"))
+-        with st.expander("Bought in a crate, bag or bottle? Low-stock warning?", icon=":material/inventory_2:",
++        with st.expander("Bought in a crate, bag or tin? Low-stock warning?", icon=":material/inventory_2:",
+                          expanded=busy):
+             p1, p2 = st.columns(2)
+-            pack = p1.selectbox("Bought in", [None] + CONTAINERS, key="meal_ing_pack",
++            pack = p1.selectbox("Purchase unit", [None] + CONTAINERS, key="meal_ing_pack",
+                                 format_func=lambda x: "Loose / as counted" if x is None else x,
+                                 help="E.g. eggs in a crate, rice in a bag, oil in a bottle. Then you can say "
+                                      "\"2 crates\" and Cashew does the sums.")
+-            size = p2.number_input(f"Each {pack or 'container'} holds ({unit})", min_value=0.0, value=None,
++            size = p2.number_input(f"1 {pack or 'purchase unit'} = how many {plural(unit)}", min_value=0.0, value=None,
+                                    format="%g", key="meal_ing_pack_size", disabled=pack is None,
+                                    placeholder="e.g. 30" if unit == "pcs" else "e.g. 5")
++            loose_buy = st.checkbox("Also sold loose", key="meal_ing_loose", disabled=pack is None,
++                                    help="Like onions: the bag holds 40, but you buy just the 5 you need.")
+             low = st.number_input(f"Warn me when stock is down to ({unit})", min_value=0.0, value=None,
+                                   key="meal_ing_low", format="%g")
+         clash = name.lower() in {n.lower() for n in k.names.values()}
+@@ -214,13 +231,14 @@ def _ingredients(k):
+         if pack and not size:
+             field_msg(f"Say how much one {pack} holds, so Cashew can count in {plural(pack)}.", "hint")
+         if pack and pack == unit:
+-            field_msg("Pick a different container from the usual unit, or leave it as loose.")
++            field_msg("Pick a different container from the base unit, or leave it as loose.")
+         bad_pack = bool(pack) and (not size or pack == unit)
+         if st.button("Add ingredient", type="primary", disabled=not name or clash or bad_pack, key="meal_ing_add",
+                      icon=":material/add:"):
+             actions.add_ingredient(name, unit, cat, to_base(low, unit)[0] if low else None,
+-                                   pack, to_base(size, unit)[0] if pack and size else None)
+-            for key in ("meal_ing_name", "meal_ing_low", "meal_ing_pack", "meal_ing_pack_size"):
++                                   pack, to_base(size, unit)[0] if pack and size else None,
++                                   loose=bool(pack and loose_buy))
++            for key in ("meal_ing_name", "meal_ing_low", "meal_ing_pack", "meal_ing_pack_size", "meal_ing_loose"):
+                 ss.pop(key, None)
+             flash(f"Added {name}")
+             st.rerun()
+@@ -231,27 +249,45 @@ def _ingredients(k):
+         if not len(ing):
+             empty("Nothing yet. Add one above, or load the starter recipes.")
+             return
++        shelves = [x for x in SECTIONS if (ing["section"] == x).any()]
++        if shelves:
++            shelf = st.pills("Shelf", ["All"] + shelves + ["Other"], key="meal_ing_shelf", default="All",
++                             label_visibility="collapsed") or "All"
++            if shelf == "Other":
++                ing = ing[~ing["section"].isin(SECTIONS)]
++            elif shelf != "All":
++                ing = ing[ing["section"] == shelf]
++        if not len(ing):
++            empty("Nothing on this shelf.")
++            return
+         table = pd.DataFrame({
+             "Name": ing["name"], "Unit": ing["unit"], "Category": ing["category"],
+-            "Low at": [from_base(float(v), base_of(u), u) if v is not None and not pd.isna(v) else None
+-                       for v, u in zip(ing["low_level"], ing["unit"])],
+             "Bought in": [p if isinstance(p, str) and p else None for p in ing["pack_name"]],
+             "Holds": [from_base(float(v), base_of(u), u) if v is not None and not pd.isna(v) else None
+                       for v, u in zip(ing["pack_size"], ing["unit"])],
++            "Loose": [bool(x) for x in ing["loose"]],
++            "Low at": [from_base(float(v), base_of(u), u) if v is not None and not pd.isna(v) else None
++                       for v, u in zip(ing["low_level"], ing["unit"])],
++            "Other units": [_alts_text(k, int(i), u) for i, u in zip(ing["id"], ing["unit"])],
+         })
+         table.index = ing["id"].astype(int).tolist()
+         ver = ss.get("meal_ing_ver", 0)
+-        edited = st.data_editor(table, key=f"meal_ing_edit_{ver}", hide_index=True, width="stretch",
++        edited = st.data_editor(table, key=f"meal_ing_edit_{ver}_{ss.get('meal_ing_shelf')}", hide_index=True,
++                                width="stretch", disabled=["Other units"],
+                                 column_config={
+                                     "Name": st.column_config.TextColumn("Name", required=True),
+-                                    "Unit": st.column_config.SelectboxColumn("Usual unit", options=UNITS, required=True),
++                                    "Unit": st.column_config.SelectboxColumn("Base unit", options=UNITS, required=True),
+                                     "Category": st.column_config.SelectboxColumn("Money category", options=cats),
++                                    "Bought in": st.column_config.SelectboxColumn("Purchase unit", options=CONTAINERS,
++                                                                                  help="Crate, bag, tin…"),
++                                    "Holds": st.column_config.NumberColumn("1 purchase unit = (base units)",
++                                                                          min_value=0.0, format="%g"),
++                                    "Loose": st.column_config.CheckboxColumn(
++                                        "Sold loose", help="Bought by the piece too: the list asks for 5 onions, "
++                                                           "not a whole bag"),
+                                     "Low at": st.column_config.NumberColumn("Warn when down to", min_value=0.0,
+                                                                            format="%g"),
+-                                    "Bought in": st.column_config.SelectboxColumn("Bought in", options=CONTAINERS,
+-                                                                                  help="Crate, bag, bottle…"),
+-                                    "Holds": st.column_config.NumberColumn("Each holds (usual unit)", min_value=0.0,
+-                                                                          format="%g"),
++                                    "Other units": st.column_config.TextColumn("Other units"),
+                                 })
+         changed = [i for i in table.index if not table.loc[i].equals(edited.loc[i])]
+         if changed:
+@@ -262,7 +298,7 @@ def _ingredients(k):
+             if len(set(names)) != len(names) or "" in names:
+                 field_msg("Each ingredient needs its own name.")
+             elif no_size:
+-                field_msg("Say how much each container holds for: " + ", ".join(no_size))
++                field_msg("Say how much each purchase unit holds for: " + ", ".join(no_size))
+             elif st.button(f"Save {len(changed)} change{'s' if len(changed) != 1 else ''}", type="primary",
+                            key="meal_ing_save", icon=":material/check:"):
+                 for i in changed:
+@@ -271,10 +307,13 @@ def _ingredients(k):
+                     low_base = to_base(float(low), row["Unit"])[0] if low is not None and not pd.isna(low) else None
+                     pack = row["Bought in"] if isinstance(row["Bought in"], str) and row["Bought in"] else None
+                     size = to_base(float(row["Holds"]), row["Unit"])[0] if pack else None
+-                    actions.update_ingredient(int(i), str(row["Name"]), row["Unit"], row["Category"], low_base, pack, size)
++                    actions.update_ingredient(int(i), str(row["Name"]), row["Unit"], row["Category"], low_base, pack, size,
++                                              loose=bool(row["Loose"]) and bool(pack))
+                 ss["meal_ing_ver"] = ver + 1
+                 flash("Ingredients saved")
+                 st.rerun()
++        st.caption("Base unit is what recipes and the pantry count in; the purchase unit is what you bring home. "
++                   "A tin of Lele Gold milk is 16 tbsp, a bag of A55 rice is 25 cups.")
+         unused = [i for i in k.food_names if i not in k.used_ingredients]
+         if unused:
+             with st.expander("Remove an ingredient"):
+@@ -286,16 +325,100 @@ def _ingredients(k):
+                             button="Remove", after=invalidate_kitchen)
+ 
+ 
++def _pairing_text(k, p):
++    out = []
++    for part in p["parts"]:
++        if part.get("recipe_id"):
++            out.append(k.recipes[part["recipe_id"]]["name"])
++        else:
++            out.append(f"{k.names.get(part['ingredient_id'], '?')} ({frac(part['qty'])} {plural(part['unit'], part['qty'])} "
++                       "a person)")
++    return " + ".join(out)
++
++
++def _pairings(k):
++    """Ready-made meals for the planner, like Kokonte + Palm nut soup."""
++    ss = st.session_state
++    left, right = st.columns([3, 2], gap="medium")
++    with left, card("meal-pairings"):
++        section("Pairings", f"{len(k.pairings)}")
++        if not k.pairings:
++            empty("No pairings yet. Make one on this page.")
++        rows = []
++        for p in k.pairings.values():
++            parts = _pairing_text(k, p)  # only worth showing when it says more than the name
++            meta = f'<div class="rule-meta">{esc(parts)}</div>' if parts.lower() != p["name"].lower() else ""
++            rows.append(f'<div class="rule"><div style="min-width:0"><div class="rule-name">🍲 {esc(p["name"])}</div>'
++                        f'{meta}</div></div>')
++        st.html("".join(rows))
++        st.caption("Pick one under Meals → Plan → Dishes. It's planned as one meal: the starch is cooked fresh, and "
++                   "the soup comes from the fridge when this week's pot is already there.")
++    with right:
++        with card("meal-pairing-new"):
++            section("Make a pairing")
++            ver = ss.get("meal_pair_ver", 0)
++            dishes = [i for i, r in sorted(k.recipes.items(), key=lambda x: (x[1]["role"] != "starch", x[1]["name"].lower()))
++                      if not r["bought"]]
++            picked = st.multiselect("Dishes eaten together", dishes, key=f"meal_pair_dishes_{ver}",
++                                    format_func=lambda i: k.recipes[i]["name"], placeholder="e.g. Banku, Okra soup")
++            side = st.selectbox("Eaten with (optional)", [None] + sorted(k.food_names, key=lambda i: k.food_names[i].lower()),
++                                format_func=lambda i: "Nothing else" if i is None else k.food_names[i],
++                                key=f"meal_pair_side_{ver}")
++            side_qty = side_unit = None
++            if side:
++                c1, c2 = st.columns(2)
++                side_qty = c1.number_input("How much a person", min_value=0.0, value=0.5, step=0.25, format="%g",
++                                           key=f"meal_pair_sq_{ver}")
++                from meals.units import units_for
++                side_unit = c2.selectbox("Unit", units_for(k.unit_of[side], k.pack(side)), key=f"meal_pair_su_{ver}")
++            fake = [{"recipe_id": i, "id": n} for n, i in enumerate(picked)] + (
++                [{"ingredient_id": side, "id": 99}] if side else [])
++            auto = k.meal_name(fake) if fake else ""
++            name = st.text_input("Name", key=f"meal_pair_name_{ver}", max_chars=120, placeholder=auto or "e.g. Banku + Okra soup")
++            final = (name or auto).strip()
++            clash = final.lower() in {p["name"].lower() for p in k.pairings.values()}
++            if clash:
++                field_msg("You already have a pairing with this name.")
++            if st.button("Save pairing", type="primary", disabled=len(picked) + bool(side) < 2 or clash or not final,
++                         key="meal_pair_save", icon=":material/check:"):
++                actions.save_pairing(None, final, picked, (side, side_qty, side_unit) if side and side_qty else None)
++                ss["meal_pair_ver"] = ver + 1
++                flash(f"Saved {final}", ":material/restaurant:")
++                st.rerun()
++            if len(picked) + bool(side) < 2:
++                field_msg("Pick at least two things eaten together.", "hint")
++        if k.pairings:
++            with card("meal-pairing-del"):
++                section("Remove a pairing")
++                pick = st.selectbox("Pairing", list(k.pairings), format_func=lambda i: k.pairings[i]["name"],
++                                    key="meal_pair_del", label_visibility="collapsed")
++                if st.button("Remove", key="meal_pair_del_go", icon=":material/delete:"):
++                    confirm(f"Remove **{k.pairings[pick]['name']}**? Its dishes stay in the recipe book.",
++                            [("DELETE FROM meals.pairings WHERE id = %s", (pick,))], f"Removed {k.pairings[pick]['name']}",
++                            button="Remove", after=invalidate_kitchen)
++        with card("meal-catalog"):
++            section("Ghanaian kitchen catalog")
++            st.caption("Everyday ingredients with their purchase units, six soup and stew templates for a week, "
++                       "the starches, and the pairings above. Anything you deleted can be added back here; "
++                       "nothing you changed is touched.")
++            if st.button("Add back anything missing", key="meal_catalog_go", icon=":material/library_add:"):
++                recipes, pairings = actions.load_catalog()
++                flash(f"Catalog checked: {recipes} recipe{'s' if recipes != 1 else ''} and {pairings} "
++                      f"pairing{'s' if pairings != 1 else ''} added back", ":material/library_add:")
++                st.rerun()
++
++
+ def render():
+     k = kitchen()
+-    page_header("Recipes", "Your recipe book and the ingredients it uses")
+-    tab_r, tab_i = st.tabs(["Recipes", "Ingredients"])
++    page_header("Recipes", "Your recipe book, the ingredients it uses, and the pairings you plan with")
++    tab_r, tab_i, tab_p = st.tabs(["Recipes", "Ingredients", "Pairings"])
+     with tab_r:
+-        if not k.recipes:
++        starter_names = {r[0].lower() for r in STARTER_RECIPES}
++        if not starter_names & {r["name"].lower() for r in k.recipes.values()}:
+             with card("meal-starter"):
+-                section("Start your recipe book")
+-                st.write("Add six everyday dishes (jollof, red red, kontomire stew, okro stew with banku, light soup, "
+-                         "and bread with eggs) with their ingredients. Change anything to suit how you cook.")
++                section("Add the everyday starter dishes")
++                st.write("Six everyday dishes (jollof, red red, kontomire stew, okro stew with banku, light soup with "
++                         "chicken, and bread with eggs) with their ingredients. Change anything to suit how you cook.")
+                 if st.button("Add starter recipes", type="primary", icon=":material/menu_book:", key="meal_starter"):
+                     n = transact(lambda conn: load_starter(conn, _expense_categories()))
+                     invalidate_kitchen()
+@@ -315,3 +438,5 @@ def render():
+                     empty("No recipes yet.")
+     with tab_i:
+         _ingredients(k)
++    with tab_p:
++        _pairings(k)
+diff --git a/meals/pages/shopping.py b/meals/pages/shopping.py
+index 832e3cb..ea47ec9 100644
+--- a/meals/pages/shopping.py
++++ b/meals/pages/shopping.py
+@@ -10,7 +10,7 @@ from meals import actions
+ from meals.data import kitchen
+ from meals.briefing import guard
+ from meals.logic import shopping_list, shortfall
+-from meals.units import base_of, units_for, fmt, frac, from_base, plural, to_base
++from meals.units import base_of, fmt, frac, from_base, loose, plural, to_base, units_for
+ from ui.components import card, empty, esc, field_msg, flash, page_header, section
+ from ui.entry import _budget_alerts
+ 
+@@ -37,7 +37,7 @@ def _amount(k, r):
+ def _qty_label(amount, unit):
+     if unit in ("pcs",):
+         return frac(amount)
+-    if unit in ("g", "kg", "ml", "l"):
++    if unit in ("g", "kg", "ml", "l", "tbsp", "tsp"):
+         return f"{amount:g} {unit}"
+     return f"{frac(amount)} {plural(unit, amount)}"
+ 
+@@ -49,10 +49,11 @@ def _rows(k, items, extras, cats, fallback):
+         why = r["reason"]
+         if r["ingredient_id"] in k.supplies:
+             why = "Household · " + (why or "running low")
++        usual = k.unit_of.get(r["ingredient_id"])
+         if r["pack"]:
+-            why += f"{'; ' if why else ''}need {fmt(r['to_buy'], r['base'])}"
++            why += f"{'; ' if why else ''}need {fmt(r['to_buy'], r['base'], usual)}"
+         if r["have"] > 0:
+-            why += f" (have {fmt(r['have'], r['base'])})"
++            why += f" (have {fmt(r['have'], r['base'], usual)})"
+         cat = k.category_of.get(r["ingredient_id"])
+         rows.append({"ing": r["ingredient_id"], "name": k.names.get(r["ingredient_id"], "?"), "amount": amount,
+                      "unit": unit, "est": r["est"], "category": cat if cat in cats else fallback, "why": why})
+@@ -163,7 +164,7 @@ TREND_COLORS = {"light": ["#2a78d6", "#eb6834", "#1baf7a", "#eda100"],
+ def _scale(k, ing, base):
+     """Prices are stored per gram / ml / piece; show them per bag, per kg, per crate…"""
+     pack = k.pack(ing)
+-    if pack and pack[2] == base:
++    if pack and pack[2] == base and not loose(pack):
+         return pack[1], pack[0]
+     usual = k.unit_of.get(ing, base)
+     return to_base(1, usual)[0], usual
+@@ -264,7 +265,7 @@ def render():
+     start, end = _range(scope, today)
+     entries = k.open_entries(start, end)
+     # the stock is shared out across all the next two weeks' meals in order, so this list is only what's missing
+-    needs = shortfall(k.allocation(today), entries, names_for_entry=lambda e: f"{k.entry_name(e)} ({e['day']:%a})")
++    needs = shortfall(k.allocation(today), entries, names_for_entry=lambda e: f"{k.meal_name_of(e)} ({e['day']:%a})")
+     items = shopping_list(needs, k.pantry, k.low_levels, k.prices, k.packs)
+     items.sort(key=lambda r: (r["low"], k.names.get(r["ingredient_id"], "").lower()))
+     extras = ss.setdefault("meal_extra", [])
+@@ -275,7 +276,7 @@ def render():
+     left, right = st.columns([3, 2], gap="medium")
+     with left:
+         with card("meal-shop-list"):
+-            planned = len(entries)
++            planned = k.meal_count(entries)
+             section("To buy")
+             for kind in ("food", "household"):
+                 g = guard(k, b, today, kind)
+diff --git a/meals/schema.py b/meals/schema.py
+index 4657671..a804f48 100644
+--- a/meals/schema.py
++++ b/meals/schema.py
+@@ -180,9 +180,40 @@ TABLES += [
+     """,
+ ]
+ 
++TABLES += [
++    # the Ghanaian kitchen catalog: which shelf an item sits on, whether it's sold loose even though it also
++    # comes in a container (onions by the piece, not the 40-onion bag), and other units it's measured in
++    # ({"container": 400} for an 80 tsp spice container; {"tbsp": 15} for margarine by the spoon), in base units
++    "ALTER TABLE meals.ingredients ADD COLUMN IF NOT EXISTS section VARCHAR(40)",
++    "ALTER TABLE meals.ingredients ADD COLUMN IF NOT EXISTS loose BOOLEAN NOT NULL DEFAULT FALSE",
++    "ALTER TABLE meals.ingredients ADD COLUMN IF NOT EXISTS alt_units JSONB",
++    # what part a dish plays in a meal: a starch (kokonte, fufu, banku…) eaten with a soup or stew
++    "ALTER TABLE meals.recipes ADD COLUMN IF NOT EXISTS role VARCHAR(10) NOT NULL DEFAULT 'main'",
++    # ready-made pairings for the planner, e.g. "Kokonte + Palm nut soup"
++    """
++    CREATE TABLE IF NOT EXISTS meals.pairings (
++        id SERIAL PRIMARY KEY,
++        name VARCHAR(120) UNIQUE NOT NULL
++    )
++    """,
++    """
++    CREATE TABLE IF NOT EXISTS meals.pairing_items (
++        id SERIAL PRIMARY KEY,
++        pairing_id INTEGER NOT NULL REFERENCES meals.pairings(id) ON DELETE CASCADE,
++        recipe_id INTEGER REFERENCES meals.recipes(id) ON DELETE CASCADE,
++        ingredient_id INTEGER REFERENCES meals.ingredients(id) ON DELETE CASCADE,  -- a side like gari
++        qty NUMERIC(12, 3),                            -- for a side item: how much per person
++        unit VARCHAR(12),
++        CHECK (recipe_id IS NOT NULL OR ingredient_id IS NOT NULL)
++    )
++    """,
++    "CREATE INDEX IF NOT EXISTS plan_day_slot_idx ON meals.plan (day, slot)",
++]
++
+ # Backup and restore order (parents before children).
+-BACKUP_TABLES = ["meals.ingredients", "meals.recipes", "meals.recipe_items", "meals.plan", "meals.fridge",
+-                 "meals.pantry", "meals.prices", "meals.trips", "meals.trip_items", "meals.waste", "meals.bought"]
++BACKUP_TABLES = ["meals.ingredients", "meals.recipes", "meals.recipe_items", "meals.pairings", "meals.pairing_items",
++                 "meals.plan", "meals.fridge", "meals.pantry", "meals.prices", "meals.trips", "meals.trip_items",
++                 "meals.waste", "meals.bought"]
+ 
+ 
+ def ensure_meals_schema(cur):
+diff --git a/meals/starter.py b/meals/starter.py
+index 892714c..f9a6626 100644
+--- a/meals/starter.py
++++ b/meals/starter.py
+@@ -2,15 +2,17 @@
+ 4 portions; edit them to match how your family cooks."""
+ 
+ # name, usual unit, money category, running-low level (usual unit), container it's bought in, container size (usual unit)
++# Units match the Ghanaian kitchen catalog (meals/catalog.py): ginger in tablespoons, garlic in cloves, gari in cups.
+ INGREDIENTS = [
+     ("Rice", "kg", "Staples", 1, "bag", 5), ("Black-eyed beans", "kg", "Staples", 0.5, "bag", 1),
+-    ("Gari", "kg", "Staples", 0.5, "bag", 1), ("Corn dough", "kg", "Staples", None, None, None),
+-    ("Onions", "pcs", "Fruits/Veges", 3, None, None), ("Tomatoes", "pcs", "Fruits/Veges", None, None, None),
+-    ("Pepper", "pcs", "Fruits/Veges", None, None, None), ("Ripe plantain", "pcs", "Fruits/Veges", None, None, None),
+-    ("Green plantain", "pcs", "Fruits/Veges", None, None, None), ("Kontomire", "bunch", "Fruits/Veges", None, None, None),
+-    ("Okro", "pcs", "Fruits/Veges", None, None, None), ("Ginger", "g", "Spices", 50, None, None),
+-    ("Garlic", "pcs", "Spices", 2, None, None), ("Stock cubes", "pcs", "Spices", 4, "pack", 10),
+-    ("Tomato paste", "sachet", "Canned or Sachet items", 2, None, None),
++    ("Gari", "cup", "Staples", 2, "olonka", 8), ("Fermented corn dough", "cup", "Staples", None, "kilo", 4),
++    ("Onions", "pcs", "Fruits/Veges", 3, "bag", 40, True), ("Tomatoes", "pcs", "Fruits/Veges", None, "basket", 35, True),
++    ("Pepper", "pcs", "Fruits/Veges", None, None, None), ("Ripe plantain", "finger", "Fruits/Veges", None, "bundle", 5, True),
++    ("Green plantain", "finger", "Fruits/Veges", None, "bundle", 5, True),
++    ("Kontomire", "bunch", "Fruits/Veges", None, None, None),
++    ("Okro", "pcs", "Fruits/Veges", None, None, None), ("Ginger", "tbsp", "Spices", 3, "thumb", 1.5),
++    ("Garlic", "clove", "Spices", 3, "bulb", 6), ("Stock cubes", "pcs", "Spices", 4, "pack", 10),
++    ("Tomato paste", "tbsp", "Canned or Sachet items", 4, "tin", 4),
+     ("Vegetable oil", "l", "Oils", 0.5, "bottle", 1.5), ("Palm oil", "l", "Oils", 0.25, "bottle", 1),
+     ("Chicken", "kg", "Meat/Fish", None, None, None), ("Smoked mackerel", "pcs", "Meat/Fish", None, None, None),
+     ("Eggs", "pcs", "Dairy/Cereal", 4, "crate", 30), ("Milk", "tin", "Dairy/Cereal", 1, None, None),
+@@ -22,26 +24,26 @@ RECIPES = [
+     ("Jollof rice with chicken", 4, 3, "Season the chicken", 3,
+      "Season and brown the chicken. Fry onions, blended tomatoes, pepper and paste; add stock, then rice. "
+      "Cover and steam until done.",
+-     [("Rice", 750, "g"), ("Chicken", 1, "kg"), ("Tomatoes", 5, "pcs"), ("Tomato paste", 2, "sachet"),
+-      ("Onions", 3, "pcs"), ("Vegetable oil", 150, "ml"), ("Pepper", 3, "pcs"), ("Ginger", 30, "g"),
+-      ("Garlic", 3, "pcs"), ("Stock cubes", 2, "pcs")]),
++     [("Rice", 750, "g"), ("Chicken", 1, "kg"), ("Tomatoes", 5, "pcs"), ("Tomato paste", 4, "tbsp"),
++      ("Onions", 3, "pcs"), ("Vegetable oil", 150, "ml"), ("Pepper", 3, "pcs"), ("Ginger", 3, "tbsp"),
++      ("Garlic", 3, "clove"), ("Stock cubes", 2, "pcs")]),
+     ("Red red", 4, 2, "Soak the beans", 10,
+      "Boil the soaked beans until soft. Fry onions, tomatoes and pepper in palm oil, add fish and beans. "
+      "Serve with fried ripe plantain and gari.",
+      [("Black-eyed beans", 500, "g"), ("Palm oil", 150, "ml"), ("Onions", 2, "pcs"), ("Tomatoes", 3, "pcs"),
+-      ("Pepper", 2, "pcs"), ("Smoked mackerel", 1, "pcs"), ("Ripe plantain", 4, "pcs"), ("Gari", 200, "g")]),
++      ("Pepper", 2, "pcs"), ("Smoked mackerel", 1, "pcs"), ("Ripe plantain", 4, "finger"), ("Gari", 1.5, "cup")]),
+     ("Kontomire stew with plantain", 4, 2, None, None,
+      "Boil the green plantain. Fry onions and tomatoes in palm oil, add chopped kontomire, fish and beaten eggs.",
+      [("Kontomire", 2, "bunch"), ("Palm oil", 100, "ml"), ("Onions", 2, "pcs"), ("Tomatoes", 4, "pcs"),
+-      ("Pepper", 2, "pcs"), ("Smoked mackerel", 2, "pcs"), ("Eggs", 4, "pcs"), ("Green plantain", 4, "pcs")]),
++      ("Pepper", 2, "pcs"), ("Smoked mackerel", 2, "pcs"), ("Eggs", 4, "pcs"), ("Green plantain", 4, "finger")]),
+     ("Okro stew with banku", 4, 2, None, None,
+      "Cook the banku from corn dough. Fry onions, tomatoes and pepper in palm oil, add fish and chopped okro.",
+-     [("Okro", 20, "pcs"), ("Corn dough", 1, "kg"), ("Palm oil", 100, "ml"), ("Smoked mackerel", 2, "pcs"),
++     [("Okro", 20, "pcs"), ("Fermented corn dough", 4, "cup"), ("Palm oil", 100, "ml"), ("Smoked mackerel", 2, "pcs"),
+       ("Onions", 1, "pcs"), ("Tomatoes", 3, "pcs"), ("Pepper", 3, "pcs")]),
+     ("Light soup with chicken", 4, 3, None, None,
+      "Steam the seasoned chicken. Boil tomatoes, onions and pepper, blend, and simmer with the chicken.",
+-     [("Chicken", 1, "kg"), ("Tomatoes", 6, "pcs"), ("Onions", 2, "pcs"), ("Pepper", 3, "pcs"), ("Ginger", 20, "g"),
+-      ("Garlic", 2, "pcs"), ("Stock cubes", 1, "pcs")]),
++     [("Chicken", 1, "kg"), ("Tomatoes", 6, "pcs"), ("Onions", 2, "pcs"), ("Pepper", 3, "pcs"), ("Ginger", 2, "tbsp"),
++      ("Garlic", 2, "clove"), ("Stock cubes", 1, "pcs")]),
+     ("Bread, eggs and tea", 4, 1, None, None, "Fry or boil the eggs; serve with bread and tea with milk.",
+      [("Bread", 1, "loaf"), ("Eggs", 4, "pcs"), ("Milk", 1, "tin")]),
+ ]
+@@ -62,29 +64,17 @@ SUPPLIES = [
+ 
+ 
+ def load_starter(conn, expense_categories):
+-    """Add the starter ingredients and recipes (skipping any names that already exist)."""
+-    from meals.units import to_base
+-    fallback = "Staples" if "Staples" in expense_categories else (expense_categories[0] if expense_categories else None)
++    """Add the starter ingredients and recipes. Items already there (any capitals, e.g. from the catalog)
++    are reused, and recipe names already used are skipped. Returns how many recipes were added."""
++    from meals.catalog import add_items, add_recipes
++    rows = []
++    for name, unit, cat, low, pack, size, *rest in INGREDIENTS:
++        rows.append((None, name, unit, cat, pack, size, bool(rest and rest[0]), None))
+     with conn.cursor() as cur:
+-        ids = {}
+-        for name, unit, cat, low, pack, size in INGREDIENTS:
+-            low_base = to_base(low, unit)[0] if low is not None else None
+-            pack_base = to_base(size, unit)[0] if size else None
+-            cur.execute("INSERT INTO meals.ingredients (name, unit, category, low_level, pack_name, pack_size) "
+-                        "VALUES (%s, %s, %s, %s, %s, %s) "
+-                        "ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name RETURNING id",
+-                        (name, unit, cat if cat in expense_categories else fallback, low_base, pack, pack_base))
+-            ids[name] = cur.fetchone()[0]
+-        added = 0
+-        for name, portions, keeps, note, hours, method, lines in RECIPES:
+-            cur.execute("SELECT 1 FROM meals.recipes WHERE name = %s", (name,))
+-            if cur.fetchone():
+-                continue
+-            cur.execute("INSERT INTO meals.recipes (name, portions, keeps_days, prep_note, prep_hours, method) "
+-                        "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id", (name, portions, keeps, note, hours, method))
+-            rid = cur.fetchone()[0]
+-            for ing, qty, unit in lines:
+-                cur.execute("INSERT INTO meals.recipe_items (recipe_id, ingredient_id, qty, unit) VALUES (%s, %s, %s, %s)",
+-                            (rid, ids[ing], qty, unit))
+-            added += 1
+-    return added
++        items = add_items(cur, rows, expense_categories)
++        from meals.units import to_base
++        for name, unit, _, low, *_ in INGREDIENTS:  # warning levels, only where none is set yet
++            if low is not None and items[name][1] == unit:
++                cur.execute("UPDATE meals.ingredients SET low_level = COALESCE(low_level, %s) WHERE id = %s",
++                            (to_base(low, unit)[0], items[name][0]))
++        return add_recipes(cur, RECIPES, with_role=False)
+diff --git a/meals/units.py b/meals/units.py
+index 75679ad..90a4707 100644
+--- a/meals/units.py
++++ b/meals/units.py
+@@ -8,24 +8,34 @@ a 5 kg bag of rice, a 1.5 l bottle of oil, a pack of 10 stock cubes. Recipes can
+ either the container ("1 crate") or the usual unit ("4 eggs"), and both add up.
+ 
+ Every quantity is stored in a "base" unit: grams, millilitres, or the count word
+-itself (pcs, tin, bunch...).
++itself (pcs, tin, bunch...). Cups, tablespoons and teaspoons are volumes (stored in ml) but are
++shown back in the cook's own measure: "3 cups of rice", not "750 ml of rice".
++
++An item can also be "sold loose" (onions, tomatoes, plantain): its container is known (a bag of
++40 onions) but the shopping list asks for 5 onions, not a whole bag. And it can have other units
++besides its container, e.g. Sankofa spice in a 5 tsp sachet or an 80 tsp container, or margarine
++by the tablespoon (15 g). A pack is (container, size in base unit, base unit[, loose[, {unit: size}]]).
+ """
+ import math
+ 
+ WEIGHT = {"g": 1.0, "kg": 1000.0}
+ VOLUME = {"ml": 1.0, "l": 1000.0, "cup": 250.0, "tbsp": 15.0, "tsp": 5.0}
+-COUNTS = ["pcs", "tin", "sachet", "bunch", "bag", "bottle", "loaf", "tray", "ball"]
++COUNTS = ["pcs", "tin", "sachet", "bunch", "bag", "bottle", "loaf", "tray", "ball", "teabag", "slice", "finger",
++          "clove"]
++KITCHEN = ("cup", "tbsp", "tsp")  # volumes the cook measures with; shown as they are, not as ml
+ # what things are bought and stored in
+ CONTAINERS = ["crate", "bag", "bottle", "can", "tin", "pack", "packet", "sachet", "box", "jar", "tray", "bunch",
+-              "loaf", "ball", "carton", "gallon", "bucket", "olonka"]
++              "loaf", "ball", "carton", "gallon", "bucket", "olonka", "tub", "pouch", "basket", "thumb", "bulb", "set",
++              "tuber", "bundle", "kilo", "container"]
+ UNITS = list(WEIGHT) + list(VOLUME) + list(dict.fromkeys(COUNTS + CONTAINERS))
+ LEFTOVER_UNITS = ["portion", "serving", "bowl", "plate", "container"]
+ 
+ _IRREGULAR = {"loaf": "loaves", "pcs": "pcs", "olonka": "olonkas"}
++_NO_PLURAL = {"g", "kg", "ml", "l", "tbsp", "tsp", "pcs"}
+ 
+ 
+ def plural(word, n=2):
+-    if 0 < float(n) <= 1 + 1e-9 or word in WEIGHT or word in VOLUME:  # 1 crate, ½ crate, 2 crates
++    if 0 < float(n) <= 1 + 1e-9 or word in _NO_PLURAL:  # 1 crate, ½ crate, 2 crates, 3 cups, 2 tbsp
+         return word
+     if word in _IRREGULAR:
+         return _IRREGULAR[word]
+@@ -43,6 +53,16 @@ def base_of(unit):
+     return unit or "pcs"
+ 
+ 
++def loose(pack):
++    """True when the item is bought by the piece even though it also comes in a container."""
++    return bool(pack and len(pack) > 3 and pack[3])
++
++
++def alts(pack):
++    """Other units this item can be measured in: {unit: size in base unit}."""
++    return (pack[4] or {}) if pack and len(pack) > 4 else {}
++
++
+ def units_for(unit, pack=None):
+     """The few units that make sense for one item, so nobody scrolls past 30 to find "bag".
+     Rice counted in kg offers kg, g and its bag; eggs offer pcs and the crate."""
+@@ -53,6 +73,9 @@ def units_for(unit, pack=None):
+         out = [unit] + [u for u in VOLUME if u != unit]
+     else:
+         out = [unit or "pcs"]
++    for extra in alts(pack):
++        if extra not in out:
++            out.append(extra)
+     if pack and pack[0] and pack[0] not in out:
+         out.insert(0, pack[0])
+     return out
+@@ -66,6 +89,8 @@ def to_base(qty, unit, pack=None):
+     """
+     if pack and unit == pack[0] and pack[1]:
+         return qty * float(pack[1]), pack[2]
++    if unit in alts(pack):
++        return qty * float(alts(pack)[unit]), pack[2]
+     if unit in WEIGHT:
+         return qty * WEIGHT[unit], "g"
+     if unit in VOLUME:
+@@ -104,10 +129,14 @@ def frac(x):
+ QUICK = [0.25, 0.5, 1, 1.5, 2, 3]  # one-tap amounts on a phone, where typing "1/2" isn't possible
+ 
+ 
+-def fmt(qty, base):
+-    """A stored quantity in the most natural unit: 1500 g -> '1.5 kg', 3 pcs -> '3 pcs'."""
++def fmt(qty, base, usual=None):
++    """A stored quantity in the most natural unit: 1500 g -> '1.5 kg', 3 pcs -> '3'.
++    usual: the item's own unit; cups, tbsp and tsp are shown as such (750 ml of rice counted in cups -> '3 cups')."""
+     if qty is None:
+         return ""
++    if usual in KITCHEN and base == "ml":
++        n = qty / VOLUME[usual]
++        return f"{frac(n)} {plural(usual, n)}"
+     if base == "g":
+         return f"{_num(qty / 1000)} kg" if abs(qty) >= 1000 else f"{_num(qty)} g"
+     if base == "ml":
+@@ -117,14 +146,14 @@ def fmt(qty, base):
+     return f"{frac(qty)} {plural(base, qty)}"
+ 
+ 
+-def fmt_stock(qty, base, pack=None):
++def fmt_stock(qty, base, pack=None, usual=None):
+     """A quantity the way it sits on the shelf: '1 crate + 6', '1.5 bags (7.5 kg)', '2 bottles'."""
+     if not pack or not pack[1] or pack[2] != base or qty < float(pack[1]) - 1e-9:
+-        return fmt(qty, base)
++        return fmt(qty, base, usual)
+     name, size = pack[0], float(pack[1])
+     if base in ("g", "ml"):
+         n = qty / size
+-        return f"{_num(n)} {plural(name, n)} ({fmt(qty, base)})"
++        return f"{_num(n)} {plural(name, n)} ({fmt(qty, base, usual)})"
+     whole = math.floor(qty / size + 1e-9)
+     rest = qty - whole * size
+     out = f"{whole} {plural(name, whole)}"
+@@ -142,6 +171,8 @@ def from_base(qty, base, unit, pack=None):
+     """A stored quantity in the unit someone typed it in (for showing it back to them)."""
+     if pack and unit == pack[0] and pack[1] and pack[2] == base:
+         return qty / float(pack[1])
++    if unit in alts(pack) and pack[2] == base:
++        return qty / float(alts(pack)[unit])
+     if unit in WEIGHT and base == "g":
+         return qty / WEIGHT[unit]
+     if unit in VOLUME and base == "ml":
+diff --git a/tests/test_kitchen.py b/tests/test_kitchen.py
+index 062cd0c..adb91e6 100644
+--- a/tests/test_kitchen.py
++++ b/tests/test_kitchen.py
+@@ -55,7 +55,7 @@ def day_chip(day):
+     return "Today" if day == today else ("Tomorrow" if day == today + timedelta(days=1) else f"{day:%a %d}")
+ 
+ 
+-def add_to_plan(page, day, slot, recipe, portions=None):
++def add_to_plan(page, day, slot, recipe, portions=None, button=r"Add (\d+ )?to "):
+     if (day - date.today()).days >= 7:
+         chip(page, "Days 8 to 14", within=".st-key-card-meal-add").click()
+         settle(page, 600)
+@@ -66,12 +66,16 @@ def add_to_plan(page, day, slot, recipe, portions=None):
+     pick(page, "Dishes", recipe)
+     page.keyboard.press("Escape")
+     settle(page, 500)
++    page.locator(".st-key-card-meal-add .section-title").click()  # close the list: a click on Add while it's
++    settle(page, 500)                                               # open would only close it
+     if portions:
+         n = page.get_by_role("spinbutton", name=re.compile(re.escape(recipe)))
+         n.fill(str(portions))
+         n.press("Enter")
+         settle(page)
+-    page.locator(".st-key-card-meal-add").get_by_role("button", name=re.compile(r"Add (\d+ )?to ")).click()
++    btn = page.locator(".st-key-card-meal-add").get_by_role("button", name=re.compile(button))
++    btn.wait_for(state="visible")  # the form has caught up with what was picked
++    btn.click()
+     settle(page, 2000)
+     no_errors(page)
+ 
+@@ -86,7 +90,11 @@ def test_starter_recipes(desktop, app_url, conn):
+     desktop.get_by_role("button", name="Add starter recipes").click()
+     settle(desktop, 2500)
+     no_errors(desktop)
+-    assert q(conn, "SELECT count(*) FROM meals.recipes")[0][0] == 6
++    from meals.starter import RECIPES
++    names = [r[0] for r in RECIPES]
++    assert q(conn, "SELECT count(*) FROM meals.recipes WHERE name = ANY(%s)", (names,))[0][0] == 6
++    assert not q(conn, "SELECT lower(name) FROM meals.ingredients GROUP BY 1 HAVING count(*) > 1"), \
++        "the starter reuses the catalog's onions, eggs, ginger…"
+     body = desktop.inner_text("body")
+     assert JOLLOF in body and "keeps 3 days" in body
+     # each ingredient points at one of the family's money categories
+@@ -131,7 +139,7 @@ def test_plan_and_shopping_totals(desktop, app_url, conn):
+     assert "- Rice: 1 bag" in share, share          # 750 g needed; rice comes in 5 kg bags
+     assert "- Black-eyed beans: 1 bag" in share, share  # 500 g doubled = 1 kg = one 1 kg bag
+     assert "- Palm oil: 1 bottle" in share, share   # 150 ml doubled = 300 ml; sold in 1 l bottles
+-    assert "- Garlic: 3" in share, share            # loose items stay as counted
++    assert "- Garlic: 1 bulb" in share, share       # 3 cloves; garlic comes by the bulb of 6
+ 
+ 
+ def test_shopping_trip_becomes_expenses(desktop, app_url, conn):
+@@ -461,3 +469,40 @@ def test_bought_food_is_paid_for_when_ticked(desktop, app_url, conn):
+     assert q(conn, "SELECT count(*) FROM transactions WHERE note LIKE 'Bought: Kenkey%%'")[0][0] == 0, \
+         "unticking takes the payment back out"
+     assert float(q(conn, "SELECT price FROM meals.recipes WHERE id = %s", (kenkey,))[0][0]) == 5
++
++
++def test_a_pairing_is_one_meal_and_the_soup_lasts(desktop, app_url, conn):
++    """Kokonte + Palm nut soup: planned as one meal, the first day cooks the whole pot, the next day's soup
++    comes from the fridge, and one tick does it all."""
++    d1, d2 = date.today() + timedelta(days=4), date.today() + timedelta(days=5)
++    q(conn, "DELETE FROM meals.plan WHERE day IN (%s, %s) AND slot = 'Lunch'", (d1, d2))
++    sign_in(desktop, app_url, path="meals")
++    add_to_plan(desktop, d1, "Lunch", "Kokonte + Palm", button=r"Add 2 to")
++    add_to_plan(desktop, d2, "Lunch", "Kokonte + Palm", button=r"Add 2 to")
++    rows = lambda d: dict(q(conn, "SELECT r.name, p.qty FROM meals.plan p JOIN meals.recipes r ON r.id = p.recipe_id "  # noqa: E731
++                                  "WHERE p.day = %s AND p.slot = 'Lunch'", (d,)))
++    assert {n: float(v) for n, v in rows(d1).items()} == {"Kokonte": 4, "Palm nut soup": 14}, "kokonte for 4, a full pot"
++    assert {n: float(v) for n, v in rows(d2).items()} == {"Kokonte": 4, "Palm nut soup": 4}, "next day: just enough"
++
++    open_app(desktop, app_url, "meals")
++    show_day(desktop, d1)
++    meal = desktop.locator(f".st-key-meal-combo-{d1:%Y%m%d}-Lunch")
++    assert "Kokonte + Palm nut soup" in meal.inner_text(), "one line for the meal"
++    meal.locator("[data-testid=stCheckbox] label").first.click()
++    settle(desktop, 2500)
++    no_errors(desktop)
++    soup = recipe_id(conn, "Palm nut soup")
++    assert {s for (s,) in q(conn, "SELECT status FROM meals.plan WHERE day = %s AND slot = 'Lunch'", (d1,))} == {"cooked"}
++    left = lambda: float(q(conn, "SELECT coalesce(sum(portions), 0) FROM meals.fridge WHERE recipe_id = %s", (soup,))[0][0])  # noqa: E731
++    assert left() == 10, "14 cooked, 4 eaten"
++
++    open_app(desktop, app_url, "meals")
++    show_day(desktop, d2)
++    desktop.locator(f".st-key-meal-combo-{d2:%Y%m%d}-Lunch").locator("[data-testid=stCheckbox] label").first.click()
++    settle(desktop, 2500)
++    no_errors(desktop)
++    got = dict(q(conn, "SELECT r.name, p.status FROM meals.plan p JOIN meals.recipes r ON r.id = p.recipe_id "
++                       "WHERE p.day = %s AND p.slot = 'Lunch'", (d2,)))
++    assert got == {"Kokonte": "cooked", "Palm nut soup": "from_fridge"}, got
++    assert left() == 6, "the soup came out of the fridge"
++    assert "Ticked off" in toasts(desktop)
+diff --git a/tests/test_logic.py b/tests/test_logic.py
+index 6ed56fb..8474e43 100644
+--- a/tests/test_logic.py
++++ b/tests/test_logic.py
+@@ -541,3 +541,139 @@ def test_notify_explains_telegram_errors():
+     assert got == ["111"], "the good chat still got it"
+     msg = str(err.value)
+     assert "Sent to 1 of 2 chats" in msg and "chat not found" in msg and "minus sign" in msg
++
++
++# ---- meals of several dishes, the Ghanaian kitchen catalog, and kitchen units ----------------------------
++from meals.units import fmt_stock as qfmt_stock  # noqa: E402
++from meals.units import from_base, plural, units_for  # noqa: E402
++
++ONION_BAG = ("bag", 40, "pcs", True, {})                     # sold loose
++GARLIC_BULB = ("bulb", 6, "clove", False, {})
++SANKOFA = ("sachet", 25.0, "ml", False, {"container": 400.0})  # 5 tsp sachet, 80 tsp container
++MARGARINE = ("tub", 900.0, "g", False, {"tbsp": 15.0})
++
++
++def test_kitchen_measures_read_naturally():
++    assert qfmt(750, "ml", "cup") == "3 cups" and qfmt(15, "ml", "tbsp") == "1 tbsp"
++    assert qfmt(375, "ml", "cup") == "1½ cups", "cups are shown in cups, not millilitres"
++    assert qfmt(750, "ml") == "750 ml", "without the item's own unit nothing changes"
++    assert plural("cup") == "cups" and plural("tbsp") == "tbsp" and plural("finger", 3) == "fingers"
++    assert qfmt_stock(6250 + 1250, "ml", ("bag", 6250, "ml"), "cup") == "1.2 bags (30 cups)"
++
++
++def test_other_units_convert():
++    assert to_base(1, "container", SANKOFA) == (400.0, "ml"), "80 tsp container"
++    assert to_base(2, "sachet", SANKOFA) == (50.0, "ml"), "a sachet is 5 tsp"
++    assert to_base(2, "tbsp", MARGARINE) == (30.0, "g"), "margarine by the spoon, kept in grams"
++    assert from_base(400, "ml", "container", SANKOFA) == 1
++    assert "container" in units_for("tsp", SANKOFA) and units_for("tsp", SANKOFA)[0] == "sachet"
++
++
++def test_loose_items_are_bought_by_the_piece():
++    needs = {(30, "pcs"): {"qty": 5.0, "for": []}, (31, "clove"): {"qty": 3.0, "for": []}}
++    out = {r["ingredient_id"]: r for r in ml.shopping_list(needs, {}, packs={30: ONION_BAG, 31: GARLIC_BULB})}
++    assert (out[30]["to_buy"], out[30]["pack"]) == (5, None), "5 onions, not a 40-onion bag"
++    assert (out[31]["packs"], out[31]["pack"], out[31]["buy_qty"]) == (1, "bulb", 6), "garlic comes by the bulb"
++
++
++SOUP_WEEK = {5: {"name": "Kokonte", "portions": 2, "keeps_days": 1, "prep_note": None, "prep_hours": None,
++                 "role": "starch"},
++             6: {"name": "Palm nut soup", "portions": 14, "keeps_days": 7, "prep_note": None, "prep_hours": None,
++                 "role": "soup"}}
++SOUP_ITEMS = {5: [(40, 1.5, "cup")], 6: [(41, 800, "g"), (42, 1, "kg")]}
++
++
++def test_a_pot_of_soup_lasts_the_week():
++    """Kokonte + Palm nut soup on Monday cooks the whole pot; on Tuesday only the kokonte needs cooking."""
++    mon = plan({"id": 1, "day": D, "slot": "Lunch", "recipe_id": 5, "qty": 2},
++               {"id": 2, "day": D, "slot": "Lunch", "recipe_id": 6, "qty": 14})
++    assert ml.from_leftovers(mon, SOUP_WEEK, SOUP_ITEMS, {}, [], 2, D, D + timedelta(days=1), "Lunch", 6), \
++        "Tuesday's soup can come from Monday's pot"
++    assert not ml.from_leftovers([], SOUP_WEEK, SOUP_ITEMS, {}, [], 2, D, D, "Lunch", 6), "no pot yet: cook one"
++    assert not ml.from_leftovers(mon, SOUP_WEEK, SOUP_ITEMS, {}, [], 2, D, D, "Lunch", 6), \
++        "checking a dish for a meal that already has dishes in it"
++    tue = plan({"id": 3, "day": D + timedelta(days=1), "slot": "Lunch", "recipe_id": 5, "qty": 2},
++               {"id": 4, "day": D + timedelta(days=1), "slot": "Lunch", "recipe_id": 6, "qty": 2})
++    alloc = ml.allocate(mon + tue, SOUP_WEEK, SOUP_ITEMS, {}, [], 2, D)
++    assert alloc["meals"][4]["status"] == "leftovers" and alloc["meals"][3]["status"] == "short"
++    need = ml.shortfall(alloc, mon + tue)
++    assert need[(40, "ml")]["short"] == 750, "kokonte powder for both days: 2 x 1.5 cups"
++    assert need[(41, "g")]["short"] == 800, "palm nut cream for one pot only"
++
++
++def test_a_meal_has_one_status():
++    assert ml.meal_status([("done", []), ("done", [])]) == "done"
++    assert ml.meal_status([("ready", []), ("short", ["Okro"])]) == "short", "anything missing makes the meal short"
++    assert ml.meal_status([("leftovers", []), ("ready", [])]) == "ready", "kokonte to cook, soup from the fridge"
++    assert ml.meal_status([("leftovers", []), ("done", [])]) == "leftovers"
++    assert ml.meal_status([("bought", []), ("done", [])]) == "bought"
++
++
++def test_the_catalog_is_in_a_new_database(conn):
++    rows = dict(q(conn, "SELECT name, pack_size FROM meals.ingredients WHERE name IN ('Lele Gold evaporated milk "
++                        "(400g)', 'A55 Gold jasmine rice (5kg)', 'Yam', 'Eggs', 'Sankofa Fish')"))
++    assert float(rows["Lele Gold evaporated milk (400g)"]) == 16 * 15, "1 tin = 16 tbsp"
++    assert float(rows["A55 Gold jasmine rice (5kg)"]) == 25 * 250, "1 bag = 25 cups"
++    assert float(rows["Yam"]) == 8 and float(rows["Eggs"]) == 30 and float(rows["Sankofa Fish"]) == 25
++    assert q(conn, "SELECT count(*) FROM meals.ingredients WHERE name LIKE 'Sankofa %%'")[0][0] == 10
++    roles = dict(q(conn, "SELECT name, role FROM meals.recipes WHERE name IN ('Palm nut soup', 'Kokonte', 'Tomato stew')"))
++    assert roles == {"Palm nut soup": "soup", "Kokonte": "starch", "Tomato stew": "stew"}
++    assert q(conn, "SELECT portions FROM meals.recipes WHERE name = 'Light soup'")[0][0] == 14, "2 people, 7 days"
++    names = {r[0] for r in q(conn, "SELECT name FROM meals.pairings")}
++    assert {"Kokonte + Palm nut soup", "Fufu + Light soup", "Banku + Okra soup", "Waakye + Stew + Gari"} <= names
++    from meals.data import Kitchen
++    from meals.data import _load as kitchen_frames
++    k = Kitchen(kitchen_frames(conn))
++    waakye = next(p for p in k.pairings.values() if p["name"] == "Waakye + Stew + Gari")
++    assert [k.recipes[x["recipe_id"]]["name"] for x in waakye["parts"] if x.get("recipe_id")] == ["Waakye", "Tomato stew"]
++    assert [(k.names[x["ingredient_id"]], x["qty"], x["unit"]) for x in waakye["parts"] if x.get("ingredient_id")] == \
++        [("Gari", 0.5, "cup")], "gari, half a cup a person"
++
++
++def test_the_catalog_is_added_only_once(conn):
++    from meals.catalog import TEMPLATES, add_recipes, seed
++    with conn.cursor() as cur:
++        assert seed(cur) is False, "already there"
++        assert add_recipes(cur, TEMPLATES) == 0, "names already used are skipped"
++
++
++def test_starting_up_skips_work_when_up_to_date(conn):
++    from core.schema import SCHEMA_KEY, _version, ensure_schema
++    assert q(conn, "SELECT value FROM app_meta WHERE key = %s", (SCHEMA_KEY,)) == [(_version(),)]
++    c = psycopg2.connect(conn.dsn)
++    try:
++        ensure_schema(c)  # one read, nothing else
++        assert q(c, "SELECT count(*) FROM meals.recipes")[0][0] >= 13
++    finally:
++        c.close()
++
++
++def test_a_paired_meal_is_one_meal(conn):
++    from datetime import datetime
++
++    from core.report import monthly
++    from meals.briefing import today_summary
++    from meals.data import Kitchen
++    from meals.data import _load as kitchen_frames
++    ids = dict(q(conn, "SELECT name, id FROM meals.recipes WHERE name IN ('Kokonte', 'Palm nut soup')"))
++    made = q(conn, "INSERT INTO meals.plan (day, slot, recipe_id, qty) VALUES (CURRENT_DATE, 'Breakfast', %s, 14), "
++                   "(CURRENT_DATE, 'Breakfast', %s, 2) RETURNING id", (ids["Palm nut soup"], ids["Kokonte"]))
++    try:
++        k = Kitchen(kitchen_frames(conn))
++        parts = [e for e in k.entries(date.today()) if e["slot"] == "Breakfast"]
++        assert k.meal_name(parts) == "Kokonte + Palm nut soup", "the starch comes first"
++        assert k.meal_count(parts) == 1
++        s = today_summary(k, datetime.now())
++        assert [m[1] for m in s["meals"] if m[0] == "Breakfast"] == ["Kokonte + Palm nut soup"], "one line, not two"
++        # the soup's shopping is labelled with the meal it's for
++        needs = ml.shortfall(k.allocation(), parts, names_for_entry=k.meal_name_of)
++        assert all(n["for"] == ["Kokonte + Palm nut soup"] for n in needs.values())
++        q(conn, "UPDATE meals.plan SET status = 'cooked' WHERE id IN %s", (tuple(r[0] for r in made),))
++        k = Kitchen(kitchen_frames(conn))
++        first_next = (date.today().replace(day=1) + timedelta(days=32)).replace(day=1)
++        report = monthly(Book(_load_frames(conn)), k, first_next)
++        meals = q(conn, "SELECT count(DISTINCT (day, slot)) FROM meals.plan WHERE status <> 'planned' "
++                        "AND date_trunc('month', day) = date_trunc('month', CURRENT_DATE)")[0][0]
++        assert f"🍳 {meals} planned meal" in report, "kokonte + palm nut soup counts as one meal"
++    finally:
++        q(conn, "DELETE FROM meals.plan WHERE id IN %s", (tuple(r[0] for r in made),))
+diff --git a/ui/theme.py b/ui/theme.py
+index 30ed4cb..22f862f 100644
+--- a/ui/theme.py
++++ b/ui/theme.py
+@@ -141,6 +141,8 @@ div[class*="st-key-meal-mk-"] [data-testid="stCheckbox"] label p { font-size: 1r
+ .mk-why { color: var(--muted); font-size: .76rem; margin: -.55rem 0 0 1.85rem; }
+ .week-cost b { font-weight: 750; }
+ .meal-slot { color: var(--muted); font-size: .74rem; font-weight: 700; margin: .55rem 0 -.2rem; }
++.meal-parts { color: var(--muted); font-size: .76rem; line-height: 1.4; margin: -.35rem 0 .2rem 1.85rem; }
++div[class*="st-key-meal-combo-"] { gap: .25rem !important; padding: .15rem 0; }
+ div[class*="st-key-meal-entry-"] { gap: .25rem !important; border-bottom: 1px solid var(--line); padding: .15rem 0; }
+ div[class*="st-key-meal-entry-"]:last-child { border-bottom: none; }
+ div[class*="st-key-meal-fr-"] { border-bottom: 1px solid var(--line); padding: .45rem 0; gap: .5rem !important; }

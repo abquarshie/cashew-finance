@@ -6,8 +6,8 @@ shows exactly the same thing on Home, on the meal plan and in the preview.
 from datetime import date, timedelta
 from html import escape
 
-from meals.logic import (GUARD_JOKE, OPEN, SLOTS, bought_cost, budget_guard, food_budget, shopping_list,
-                          shortfall)
+from meals.logic import (GUARD_JOKE, OPEN, SLOTS, bought_cost, budget_guard, food_budget, meal_status,
+                          shopping_list, shortfall)
 from meals.quips import with_joke
 from meals.units import base_of, fmt, plural, to_base
 
@@ -34,6 +34,33 @@ def entry_status(k, e, today):
     return "ready", "all in"
 
 
+def meal_state(k, parts, today):
+    """(status, short label) for a whole meal, e.g. Kokonte + Palm nut soup: the soup from the fridge and the
+    kokonte to cook counts as all in; anything missing for either dish makes the meal short."""
+    if len(parts) == 1:
+        return entry_status(k, parts[0], today)
+    states, missing = [], []
+    for e in parts:
+        status, label = entry_status(k, e, today)
+        m = k.meal_status(e["id"], today) or {}
+        names = [k.names.get(ing, "?") for ing, _, _ in m.get("missing", [])] if status == "short" else []
+        missing += [n for n in names if n not in missing]
+        states.append((status, names))
+    status = meal_status(states)
+    if status == "done":
+        return "done", "done"
+    if status == "short":
+        return "short", "missing " + ", ".join(missing[:3]) + (f" +{len(missing) - 3}" if len(missing) > 3 else "")
+    if status == "leftovers":
+        return "leftovers", "from the fridge"
+    if status == "bought":
+        return "bought", "buy on the day"
+    fridge = [k.entry_name(e) for e, (s, _) in zip(parts, states) if s == "leftovers"]
+    to_buy = [k.entry_name(e) for e, (s, _) in zip(parts, states) if s == "bought"]
+    extra = ([f"{', '.join(fridge)} from the fridge"] if fridge else []) + ([f"buy {', '.join(to_buy)}"] if to_buy else [])
+    return "ready", "all in" + (f" ({'; '.join(extra)})" if extra else "")
+
+
 def today_summary(k, now):
     """What to cook today and whether it's all in, plus the one reminder that matters most.
 
@@ -42,10 +69,10 @@ def today_summary(k, now):
     today = now.date()
     meals = []
     for slot in SLOTS:
-        for e in k.entries(today):
-            if e["slot"] == slot:
-                status, label = entry_status(k, e, today)
-                meals.append((slot, k.entry_name(e), status, label))
+        parts = [e for e in k.entries(today) if e["slot"] == slot]
+        if parts:
+            status, label = meal_state(k, parts, today)
+            meals.append((slot, k.meal_name(parts), status, label))
     notes = k.notes(now)
     if notes:
         note = notes[0]
@@ -103,13 +130,11 @@ def guard(k, book, today, kind="food"):
 def _menu(k, day):
     lines = []
     for slot in SLOTS:
-        entries = [e for e in k.entries(day) if e["slot"] == slot]
-        if entries:
-            parts = []
-            for e in entries:
-                status, label = entry_status(k, e, day)
-                parts.append(f"{k.entry_name(e)} {STATUS_ICON[status]}" + (f" ({label})" if status == "short" else ""))
-            lines.append(f"<b>{slot}:</b> {escape(', '.join(parts))}")
+        parts = [e for e in k.entries(day) if e["slot"] == slot]
+        if parts:
+            status, label = meal_state(k, parts, day)
+            text = f"{k.meal_name(parts)} {STATUS_ICON[status]}" + (f" ({label})" if status == "short" else "")
+            lines.append(f"<b>{slot}:</b> {escape(text)}")
     return lines
 
 
@@ -163,7 +188,7 @@ def evening(k, now):
         out += [""] + [f"{ICON[t]} {escape(x)}" for t, x in notes]
     elif to_buy:
         items = ", ".join(
-            (f"{r['packs']} {plural(r['pack'], r['packs'])} " if r["pack"] else f"{fmt(r['to_buy'], r['base'])} ")
+            (f"{r['packs']} {plural(r['pack'], r['packs'])} " if r["pack"] else f"{fmt(r['to_buy'], r['base'], k.unit_of.get(r['ingredient_id']))} ")
             .replace("pcs ", "") + k.names.get(r["ingredient_id"], "?") for r in to_buy[:8])
         out += ["", f"🛒 Buy for tomorrow: {escape(items)}"]
     return "\n".join(out)

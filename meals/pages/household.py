@@ -78,7 +78,7 @@ def _items(k):
                 state = pill("Low", "warn")
             else:
                 state = ""
-            shelf = fmt_stock(have, base, k.pack(ing)) if have > 0 else "none"
+            shelf = fmt_stock(have, base, k.pack(ing), k.unit_of.get(ing)) if have > 0 else "none"
             row = st.container(horizontal=True, vertical_alignment="center", key=f"supply-{ing}")
             row.html(f'<div style="min-width:0"><div class="rule-name">{esc(k.names.get(ing, "?"))}{state}</div>'
                      f'<div class="rule-meta">{esc(shelf)}</div></div>', width="stretch")
