@@ -17,7 +17,7 @@ TTL = int(os.environ.get("CASHEW_CACHE_SECONDS", "60"))  # tests shorten this
 HOUSEHOLD_KEY = "meals_household"
 
 QUERIES = {
-    "ingredients": "SELECT id, name, unit, category, low_level, pack_name, pack_size FROM meals.ingredients "
+    "ingredients": "SELECT id, name, unit, category, low_level, pack_name, pack_size, kind FROM meals.ingredients "
                    "ORDER BY lower(name)",
     "recipes": "SELECT id, name, portions, keeps_days, prep_note, prep_hours, method FROM meals.recipes ORDER BY lower(name)",
     "items": "SELECT id, recipe_id, ingredient_id, qty, unit FROM meals.recipe_items ORDER BY id",
@@ -77,6 +77,12 @@ class Kitchen:
         self.names = dict(zip(ing["id"], ing["name"]))
         self.unit_of = dict(zip(ing["id"], ing["unit"]))
         self.category_of = {i: c for i, c in zip(ing["id"], ing["category"]) if c}
+        # household supplies (cleaning things, toilet roll…) share the pantry and shopping list with food,
+        # but never appear in recipes or meal ideas, and have their own budget
+        self.supplies = {int(i) for i, kd in zip(ing["id"], ing["kind"]) if kd == "household"}
+        self.food_names = {i: n for i, n in self.names.items() if int(i) not in self.supplies}
+        self.food_categories = {c for i, c in self.category_of.items() if int(i) not in self.supplies}
+        self.supply_categories = {c for i, c in self.category_of.items() if int(i) in self.supplies}
         # containers: {ingredient_id: (name, size in base unit, base unit)}
         self.packs = {int(i): (pn, float(ps), base_of(u)) for i, u, pn, ps in
                       zip(ing["id"], ing["unit"], ing["pack_name"], ing["pack_size"])
@@ -142,9 +148,21 @@ class Kitchen:
         """Today's and tomorrow's reminders, with jokes if they're switched on."""
         now = now or datetime.now()
         today = now.date()
+        food_low = {key: v for key, v in self.low_levels.items() if key[0] not in self.supplies}
         return reminders(now, self.entries(today, today + timedelta(days=1)), self.recipes, self.items, self.pantry,
                          self.fridge, self.names, self.household, packs=self.packs, alloc=self.allocation(today),
-                         fun=self.fun, low_levels=self.low_levels)
+                         fun=self.fun, low_levels=food_low)
+
+    def supplies_low(self):
+        """Household supplies at or below their warning level (or out), by name."""
+        out = []
+        for i in sorted(self.supplies, key=lambda x: self.names.get(x, "").lower()):
+            base = base_of(self.unit_of.get(i, "pcs"))
+            have = float(self.pantry.get((i, base), 0.0))
+            level = self.low_levels.get((i, base))
+            if have <= 0 or (level is not None and have <= level):
+                out.append(self.names.get(i, "?"))
+        return out
 
     # ---- names ----------------------------------------------------------------
     def entry_name(self, e):

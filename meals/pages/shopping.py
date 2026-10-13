@@ -47,6 +47,8 @@ def _rows(k, items, extras, cats, fallback):
     for r in items:
         amount, unit = _amount(k, r)
         why = r["reason"]
+        if r["ingredient_id"] in k.supplies:
+            why = "Household · " + (why or "running low")
         if r["pack"]:
             why += f"{'; ' if why else ''}need {fmt(r['to_buy'], r['base'])}"
         if r["have"] > 0:
@@ -243,9 +245,10 @@ def render():
         with card("meal-shop-list"):
             planned = len(entries)
             section("To buy")
-            g = guard(k, b, today)
-            if g:
-                field_msg(g[1], g[0])
+            for kind in ("food", "household"):
+                g = guard(k, b, today, kind)
+                if g:
+                    field_msg(g[1], g[0])
             st.caption(f"{start:%a %d} to {end:%a %d %b}: {planned} meal{'s' if planned != 1 else ''} not cooked yet")
             if not rows:
                 empty("Nothing to buy: the pantry and fridge already cover the planned meals." if entries else

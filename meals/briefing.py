@@ -8,7 +8,7 @@ from html import escape
 
 from meals.logic import (GUARD_JOKE, OPEN, SLOTS, budget_guard, food_budget, shopping_list, shortfall)
 from meals.quips import with_joke
-from meals.units import fmt, plural
+from meals.units import base_of, fmt, plural, to_base
 
 ICON = {"warn": "⚠️", "info": "•", "ok": "✅"}
 STATUS_ICON = {"ready": "✅", "leftovers": "🥡", "short": "🛒", "done": "✔️"}
@@ -65,18 +65,33 @@ def planned_cost(k, today, until=None):
     return round(sum(r["est"] or 0 for r in items), 2), sum(1 for r in items if r["est"] is None)
 
 
-def guard(k, book, today):
-    """The food budget guard: (tone, text) or None. Looks ahead at the planned shopping."""
-    cats = {c for c in k.category_of.values() if c}
-    fb = food_budget(book, cats, today) if book is not None else None
+def supplies_cost(k):
+    """Estimated cost of topping up the household supplies that are low."""
+    low = {key: v for key, v in k.low_levels.items() if key[0] in k.supplies}
+    out = [r for r in shopping_list({}, k.pantry, low, k.prices, k.packs)]
+    # items that are simply out (no warning level set) still need buying
+    for i in k.supplies:
+        base = base_of(k.unit_of.get(i, "pcs"))
+        if (i, base) not in low and float(k.pantry.get((i, base), 0)) <= 0:
+            pack = k.pack(i)
+            q = pack[1] if pack and pack[2] == base else to_base(1, k.unit_of.get(i, "pcs"))[0]
+            out += shopping_list({(i, base): {"qty": q, "short": q, "for": []}}, {}, prices=k.prices, packs=k.packs)
+    return round(sum(r["est"] or 0 for r in out), 2)
+
+
+def guard(k, book, today, kind="food"):
+    """The budget guard for food (looking ahead at the meal plan's shopping) or household supplies
+    (looking ahead at topping up what's low): (tone, text) or None."""
+    cats = k.food_categories if kind == "food" else k.supply_categories
+    fb = food_budget(book, {c for c in cats if c}, today) if book is not None and cats else None
     if not fb:
         return None
-    planned, _ = planned_cost(k, today)
-    g = budget_guard(fb["limit"], fb["spent"], planned)
+    planned = planned_cost(k, today)[0] if kind == "food" else supplies_cost(k)
+    g = budget_guard(fb["limit"], fb["spent"], planned, what=kind)
     if not g:
         return None
     tone = "hint" if g["level"] == "75" else "warn"
-    return tone, with_joke(GUARD_JOKE[g["level"]], g["text"], today, "", k.fun)
+    return tone, with_joke(GUARD_JOKE[g["level"]], g["text"], today, kind, k.fun, what=kind)
 
 
 def _menu(k, day):
@@ -103,6 +118,10 @@ def morning(k, book, now, budget_left=None):
     notes = k.notes(now)
     if notes:
         out += ["", "<b>To do</b>"] + [f"{ICON[t]} {escape(x)}" for t, x in notes]
+    low = k.supplies_low()
+    if low:
+        text = "Household running low: " + ", ".join(low[:6]) + (f" and {len(low) - 6} more" if len(low) > 6 else "") + "."
+        out += ["", "🧽 " + escape(with_joke("supplies_low", text, today, "", k.fun))]
 
     if book is not None:
         try:
@@ -112,9 +131,10 @@ def morning(k, book, now, budget_left=None):
             if budget_left is not None:
                 money_line += f" Food budget left: GH₵{budget_left:,.2f}."
             out += ["", escape(money_line)]
-            g = guard(k, book, today)
-            if g:
-                out.append(f"⚠️ {escape(g[1])}")
+            for kind in ("food", "household"):
+                g = guard(k, book, today, kind)
+                if g:
+                    out.append(f"⚠️ {escape(g[1])}")
         except Exception:
             pass
     return "\n".join(out)

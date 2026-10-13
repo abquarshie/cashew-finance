@@ -7,7 +7,7 @@ import pytest
 
 from conftest import OWNER, q
 from core.auth import hash_password
-from helpers import chip, go, no_errors, settle, sign_in, tab, toasts
+from helpers import chip, go, no_errors, open_app, settle, sign_in, tab, toasts
 
 pytestmark = pytest.mark.browser
 JOLLOF, REDRED = "Jollof rice with chicken", "Red red"
@@ -342,3 +342,35 @@ def test_whatsapp_and_price_trends(phone, app_url, conn):
     no_errors(phone)
     assert phone.locator('[data-testid="stVegaLiteChart"], .vega-embed').count() >= 1, "eggs bought in two months"
     assert "Eggs (per crate)" in phone.inner_text("body")
+
+
+def test_household_supplies_have_their_own_budget(desktop, app_url, conn):
+    sign_in(desktop, app_url, path="meals?tab_meals=Household")
+    desktop.get_by_role("button", name="Add common household items").click()
+    settle(desktop, 2500)
+    no_errors(desktop)
+    kinds = dict(q(conn, "SELECT name, kind FROM meals.ingredients WHERE name IN ('Bleach', 'Rice')"))
+    assert kinds == {"Bleach": "household", "Rice": "food"}
+    assert q(conn, "SELECT group_name FROM categories WHERE name = 'Cleaning supplies'") == [("Household",)]
+
+    bleach = ing_id(conn, "Bleach")
+    desktop.locator(f".st-key-supply-{bleach}").get_by_role("button").last.click()   # + one bottle
+    settle(desktop, 2000)
+    assert stock(conn, "Bleach", "ml") == 1000, "one tap adds one 1 l bottle"
+
+    box = desktop.get_by_role("spinbutton", name="Monthly limit (GH₵)")
+    box.fill("300")
+    box.press("Enter")
+    settle(desktop)
+    desktop.get_by_role("button", name="Set budget").click()
+    settle(desktop, 2000)
+    assert q(conn, "SELECT monthly_limit FROM budgets WHERE category = 'Household'") == [(300,)], \
+        "a budget of its own, not part of food"
+
+    go(desktop, "Shopping list")
+    body = desktop.inner_text("body")
+    assert "Toilet roll" in body and "Household" in body, "low supplies go on the list, marked as household"
+    open_app(desktop, app_url, "meals?tab_meals=Recipes")
+    desktop.get_by_role("tab", name="Ingredients").click()
+    settle(desktop)
+    assert "Bleach" not in desktop.inner_text("body"), "supplies never show among food ingredients"

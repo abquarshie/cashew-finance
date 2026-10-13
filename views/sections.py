@@ -28,11 +28,12 @@ def plan():
 
 
 def kitchen():
-    from meals.pages import fridge, plan as meal_plan, recipes
+    from meals.pages import fridge, household, plan as meal_plan, recipes
     tabbed("meals", "Meals", "", [
         ("Plan", meal_plan.render),
         ("Recipes", recipes.render),
         ("Fridge", fridge.render),
+        ("Household", household.render),
     ])
 
 

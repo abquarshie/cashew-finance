@@ -234,23 +234,25 @@ def food_budget(book, categories, today):
     return {"limit": limit, "spent": spent, "names": names} if names else None
 
 
-def budget_guard(limit, spent, planned):
-    """Warn before the shopping, not after. planned: estimated cost of what the plan still needs bought
-    this month. Returns {"level": "75" | "90" | "will_go_over" | "over", "text": ...} or None."""
+def budget_guard(limit, spent, planned, what="food"):
+    """Warn before the shopping, not after. planned: estimated cost of what still needs buying this month.
+    what: "food" or "household". Returns {"level": "75" | "90" | "will_go_over" | "over", "text": ...} or None."""
     if not limit or limit <= 0:
         return None
     gh = lambda x: f"GH₵{x:,.2f}"  # noqa: E731
     after = spent + (planned or 0)
+    What = what.capitalize()
     if spent > limit:
-        return {"level": "over", "text": f"Food spending is {gh(spent - limit)} over this month's {gh(limit)} budget."}
+        return {"level": "over", "text": f"{What} spending is {gh(spent - limit)} over this month's {gh(limit)} budget."}
     if after > limit:
+        swap = " Consider swapping a dish." if what == "food" else ""
         return {"level": "will_go_over",
-                "text": f"The planned shopping (about {gh(planned)}) would take food spending to {gh(after)}, "
-                        f"{gh(after - limit)} over the {gh(limit)} budget. Consider swapping a dish."}
+                "text": f"The planned shopping (about {gh(planned)}) would take {what} spending to {gh(after)}, "
+                        f"{gh(after - limit)} over the {gh(limit)} budget.{swap}"}
     pct = after / limit * 100
     if pct >= 75:
         return {"level": "90" if pct >= 90 else "75",
-                "text": f"With the planned shopping, food spending reaches {pct:.0f}% of the {gh(limit)} budget "
+                "text": f"With the planned shopping, {what} spending reaches {pct:.0f}% of the {gh(limit)} budget "
                         f"({gh(limit - after)} left)."}
     return None
 

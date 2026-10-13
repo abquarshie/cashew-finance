@@ -80,11 +80,15 @@ def monthly(book, kitchen=None, today=None):
 
 def _kitchen(book, k, period, spent):
     lines = []
-    cats = {c for c in k.category_of.values() if c}
+    cats = {c for c in k.food_categories if c}
     food = float(spent[spent["category"].isin(cats)]["amount"].sum()) if len(spent) and cats else 0.0
     if food > 0:
         per_day = food / max(k.household, 1) / period.days_in_month
         lines.append(escape(f"🍲 Food: {gh(food)}, about {gh(per_day)} a person a day ({k.household} people)."))
+    supplies = {c for c in k.supply_categories if c}
+    house = float(spent[spent["category"].isin(supplies)]["amount"].sum()) if len(spent) and supplies else 0.0
+    if house > 0:
+        lines.append(escape(f"🧽 Household supplies: {gh(house)}."))
     cooked = [e for e in k.plan if pd.Period(e["day"], "M") == period and e["status"] != "planned"]
     if cooked:
         lines.append(escape(f"🍳 {len(cooked)} planned meals ticked off."))

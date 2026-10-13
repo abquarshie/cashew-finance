@@ -340,7 +340,7 @@ def test_jokes_name_whats_actually_short():
     from meals.quips import LINES, joke
     for kind in LINES:  # every line works with the names given, and none is left with a {placeholder}
         for i in range(30):
-            j = joke(kind, D + timedelta(days=i), dish="light soup", item="tomatoes")
+            j = joke(kind, D + timedelta(days=i), dish="light soup", item="tomatoes", what="food")
             assert j and "{" not in j
     assert "{" not in joke("missing", D), "lines that need a name are skipped when there isn't one"
     e = plan({"id": 1, "day": D, "slot": "Supper", "recipe_id": 2, "qty": 4})
@@ -358,6 +358,14 @@ def test_month_so_far_compares_the_same_days(book_now):
     assert part[1] <= full[1]
     from ui.components import change_pill
     assert "▲ 20% vs 1–13 Sep" in change_pill(120, 100, versus="1–13 Sep")
+
+
+def test_household_budget_words():
+    g = ml.budget_guard(300, 280, 50, what="household")
+    assert g["level"] == "will_go_over" and g["text"].startswith("The planned shopping") and "household spending" in g["text"]
+    assert "swapping a dish" not in g["text"], "no dish to swap for bleach"
+    from meals.quips import joke
+    assert "food" not in joke("budget_75", D, "household", what="household")
 
 
 def test_budget_guard_looks_ahead():
@@ -443,6 +451,7 @@ def test_phone_messages(conn):
     assert msg is None or msg.startswith("🌙 <b>For tomorrow")
     from core.report import monthly
     report = monthly(b, k, date.today())
+    assert "Bleach" not in " ".join(k.food_names.values()), "household supplies aren't food"
     assert report.startswith("📊 <b>") and "In GH₵" in report and "Budgets" in report and "<script" not in report
 
 

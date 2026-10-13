@@ -47,6 +47,20 @@ RECIPES = [
 ]
 
 
+# Household supplies: (name, counted in, warn when down to, bought in, each holds)
+SUPPLIES = [
+    ("Washing powder", "kg", 0.5, "pack", 1),
+    ("Dishwashing liquid", "ml", 200, "bottle", 500),
+    ("Bleach", "ml", 250, "bottle", 1000),
+    ("Disinfectant", "ml", 100, "bottle", 500),
+    ("Toilet roll", "pcs", 4, "pack", 10),
+    ("Bathing soap", "pcs", 2, "pack", 3),
+    ("Bar soap for washing", "pcs", 1, None, None),
+    ("Sponges", "pcs", 1, "pack", 3),
+    ("Bin bags", "pcs", 5, "pack", 20),
+]
+
+
 def load_starter(conn, expense_categories):
     """Add the starter ingredients and recipes (skipping any names that already exist)."""
     from meals.units import to_base

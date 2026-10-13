@@ -342,10 +342,16 @@ def test_edit_delete_and_undo_in_the_table(desktop, app_url, conn):
 
 
 def test_auto_transaction_fills_in_missed_dates(desktop, app_url, conn):
-    sign_in(desktop, app_url, path="auto")
+    sign_in(desktop, app_url, path="transactions?tab_transactions=Repeats")
+    desktop.get_by_text("New auto transaction").wait_for()
+    settle(desktop, 1500)
     box(desktop, "Name").fill("Weekly MoMo top-up")
     box(desktop, "Name").press("Enter")
-    type_in(desktop.get_by_role("spinbutton", name="Amount (GH₵)").last, "50")
+    amount = desktop.get_by_role("spinbutton", name="Amount (GH₵)").last
+    type_in(amount, "50")
+    settle(desktop)
+    if not amount.input_value():  # the form redrew while typing; type it again
+        type_in(amount, "50")
     type_in(desktop.get_by_role("spinbutton", name="Fee (GH₵), optional"), "0.5")
     desktop.get_by_label("Repeats").click()
     desktop.get_by_role("option", name="Weekly").click()

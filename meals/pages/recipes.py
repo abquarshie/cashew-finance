@@ -74,7 +74,7 @@ def _editor(k):
     if not len(k.ingredients):
         field_msg("Add ingredients first, under the Ingredients tab.", "hint")
         return
-    names = sorted(k.names.values(), key=str.lower)
+    names = sorted(k.food_names.values(), key=str.lower)  # household supplies never go in a recipe
     id_of = {v: i for i, v in k.names.items()}
     rows = [{"Ingredient": k.names.get(i), "Amount": float(q), "Unit": u} for i, q, u in k.items.get(rid, [])]
     lines = st.data_editor(
@@ -171,11 +171,11 @@ def _ingredients(k):
             st.rerun()
 
     with card("meal-ing-list"):
-        section("Your ingredients", f"{len(k.ingredients)}")
-        if not len(k.ingredients):
+        ing = k.ingredients[k.ingredients["kind"] != "household"]  # supplies are under Meals → Household
+        section("Your ingredients", f"{len(ing)}")
+        if not len(ing):
             empty("Nothing yet. Add one above, or load the starter recipes.")
             return
-        ing = k.ingredients
         table = pd.DataFrame({
             "Name": ing["name"], "Unit": ing["unit"], "Category": ing["category"],
             "Low at": [from_base(float(v), base_of(u), u) if v is not None and not pd.isna(v) else None
@@ -220,7 +220,7 @@ def _ingredients(k):
                 ss["meal_ing_ver"] = ver + 1
                 flash("Ingredients saved")
                 st.rerun()
-        unused = [i for i in k.names if i not in k.used_ingredients]
+        unused = [i for i in k.food_names if i not in k.used_ingredients]
         if unused:
             with st.expander("Remove an ingredient"):
                 pick = st.selectbox("Not used in any recipe or plan", unused, format_func=lambda i: k.names[i],

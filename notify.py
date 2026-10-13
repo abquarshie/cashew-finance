@@ -27,7 +27,7 @@ from meals.data import _load as load_kitchen
 def food_budget_left(book, kitchen, today):
     """What's left this month in the budgets covering the kitchen's categories, or None."""
     from meals.logic import food_budget
-    fb = food_budget(book, {c for c in kitchen.category_of.values() if c}, today)
+    fb = food_budget(book, {c for c in kitchen.food_categories if c}, today)
     return max(fb["limit"] - fb["spent"], 0) if fb else None
 
 

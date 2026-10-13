@@ -59,16 +59,21 @@ LINES = {
         "Pantry: ready. Pot: ready. Chef: please report to the kitchen.",
     ],
     "budget_75": [
-        "The food budget is starting to sweat.",
-        "Easy on the extra fish: the budget is watching.",
+        "The {what} budget is starting to sweat.",
+        "Easy on the extras: the {what} budget is watching.",
     ],
     "budget_90": [
-        "The food budget is on its last few cedis.",
-        "Maybe a simple waakye week, not a party.",
+        "The {what} budget is on its last few cedis.",
+        "Time for a simple week, not a party.",
     ],
     "budget_over": [
-        "The food budget has left the chat.",
+        "The {what} budget has left the chat.",
         "Something has to give, and it shouldn't be the rent.",
+    ],
+    "supplies_low": [
+        "The bleach bottle is giving its last drops.",
+        "Clean house, empty cupboard. Time to restock.",
+        "No soap, no shine.",
     ],
 }
 

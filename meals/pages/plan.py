@@ -139,10 +139,10 @@ def _add_form():
         ok = rid is not None
         args = dict(recipe_id=rid, qty=portions)
     else:
-        if not k.names:
+        if not k.food_names:
             field_msg("Add ingredients first, under Meals → Recipes.", "hint")
             return
-        ing = st.selectbox("Item", list(k.names), index=None, placeholder="e.g. Bananas",
+        ing = st.selectbox("Item", list(k.food_names), index=None, placeholder="e.g. Bananas",
                            format_func=lambda i: k.names[i], key="meal_add_item")
         st.pills("Quick amount", QUICK, key="meal_add_quick", format_func=frac, on_change=_quick_qty,
                  label_visibility="collapsed")

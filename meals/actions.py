@@ -223,15 +223,69 @@ def set_household(n):
 
 
 # ---- ingredients and recipes -------------------------------------------------------------------
-def add_ingredient(name, unit, category, low_level=None, pack_name=None, pack_size=None):
-    """pack_size is in the base unit (e.g. 30 for a crate of eggs, 5000 for a 5 kg bag of rice)."""
+def add_ingredient(name, unit, category, low_level=None, pack_name=None, pack_size=None, kind="food"):
+    """pack_size is in the base unit (e.g. 30 for a crate of eggs, 5000 for a 5 kg bag of rice).
+    kind: 'food', or 'household' for cleaning things, toilet roll and other supplies."""
     def work(conn):
         with conn.cursor() as cur:
-            cur.execute("INSERT INTO meals.ingredients (name, unit, category, low_level, pack_name, pack_size) "
-                        "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
-                        (name.strip(), unit, category, low_level, pack_name or None, pack_size or None))
+            cur.execute("INSERT INTO meals.ingredients (name, unit, category, low_level, pack_name, pack_size, kind) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
+                        (name.strip(), unit, category, low_level, pack_name or None, pack_size or None, kind))
             return cur.fetchone()[0]
     return _run(work)
+
+
+SUPPLIES_CATEGORY, SUPPLIES_GROUP = "Cleaning supplies", "Household"
+
+
+def ensure_supplies_category(cur):
+    """The money category household supplies are logged under, created the first time it's needed."""
+    cur.execute("INSERT INTO categories (name, group_name, kind) VALUES (%s, %s, 'Expense') ON CONFLICT (name) DO NOTHING",
+                (SUPPLIES_CATEGORY, SUPPLIES_GROUP))
+
+
+def add_supply(name, unit, category, low_level=None, pack_name=None, pack_size=None):
+    from core.db import invalidate
+
+    def work(conn):
+        with conn.cursor() as cur:
+            ensure_supplies_category(cur)
+            cur.execute("INSERT INTO meals.ingredients (name, unit, category, low_level, pack_name, pack_size, kind) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, 'household') RETURNING id",
+                        (name.strip(), unit, category or SUPPLIES_CATEGORY, low_level, pack_name or None,
+                         pack_size or None))
+            return cur.fetchone()[0]
+    out = _run(work)
+    invalidate()  # the new money category
+    return out
+
+
+def load_supplies_starter():
+    """The everyday cleaning things most homes keep, ready to count. Skips names already there."""
+    from core.db import invalidate
+    from meals.starter import SUPPLIES
+    from meals.units import to_base
+
+    def work(conn):
+        added = 0
+        with conn.cursor() as cur:
+            ensure_supplies_category(cur)
+            for name, unit, low, pack, size in SUPPLIES:
+                cur.execute("INSERT INTO meals.ingredients (name, unit, category, low_level, pack_name, pack_size, kind) "
+                            "VALUES (%s, %s, %s, %s, %s, %s, 'household') ON CONFLICT (name) DO NOTHING",
+                            (name, unit, SUPPLIES_CATEGORY, to_base(low, unit)[0] if low is not None else None,
+                             pack, to_base(size, unit)[0] if size else None))
+                added += cur.rowcount
+        return added
+    out = _run(work)
+    invalidate()
+    return out
+
+
+def set_budget(category, limit):
+    from core.db import execute
+    execute("INSERT INTO budgets (category, monthly_limit) VALUES (%s, %s) "
+            "ON CONFLICT (category) DO UPDATE SET monthly_limit = EXCLUDED.monthly_limit", (category, float(limit)))
 
 
 def update_ingredient(ing_id, name, unit, category, low_level, pack_name=None, pack_size=None):

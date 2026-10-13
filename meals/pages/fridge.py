@@ -80,6 +80,7 @@ def _fridge(k):
 def _pantry(k):
     ss = st.session_state
     keys = {(int(i), base_of(u)) for i, u in zip(k.ingredients["id"], k.ingredients["unit"])} | set(k.pantry)
+    keys = {key for key in keys if key[0] not in k.supplies}  # household supplies have their own tab
     if not keys:
         with card("meal-pantry"):
             empty("No ingredients yet. Add them under Meals → Recipes.")

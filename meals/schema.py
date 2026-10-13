@@ -138,6 +138,11 @@ TABLES += [
     """,
 ]
 
+TABLES += [
+    # household supplies (washing powder, bleach, toilet roll…) live alongside food, marked as 'household'
+    "ALTER TABLE meals.ingredients ADD COLUMN IF NOT EXISTS kind VARCHAR(10) NOT NULL DEFAULT 'food'",
+]
+
 # Backup and restore order (parents before children).
 BACKUP_TABLES = ["meals.ingredients", "meals.recipes", "meals.recipe_items", "meals.plan", "meals.fridge",
                  "meals.pantry", "meals.prices", "meals.trips", "meals.trip_items", "meals.waste"]
