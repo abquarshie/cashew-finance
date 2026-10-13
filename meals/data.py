@@ -23,7 +23,7 @@ QUERIES = {
     "items": "SELECT id, recipe_id, ingredient_id, qty, unit FROM meals.recipe_items ORDER BY id",
     # a window around this week is all the screens need
     "plan": "SELECT id, day, slot, recipe_id, ingredient_id, qty, unit, status, done_at, done_by FROM meals.plan "
-            "WHERE day BETWEEN CURRENT_DATE - 28 AND CURRENT_DATE + 63 ORDER BY day, id",
+            "WHERE day BETWEEN CURRENT_DATE - 40 AND CURRENT_DATE + 63 ORDER BY day, id",
     "fridge": "SELECT id, recipe_id, label, portions, cooked_on, eat_by, plan_id, unit FROM meals.fridge "
               "WHERE portions > 0 ORDER BY eat_by, id",
     "pantry": "SELECT ingredient_id, unit, qty, updated_at FROM meals.pantry",
@@ -32,9 +32,9 @@ QUERIES = {
              "FROM meals.trips t LEFT JOIN meals.trip_items i ON i.trip_id = t.id "
              "GROUP BY t.id ORDER BY t.date DESC, t.id DESC LIMIT 20",
     "settings": "SELECT key, value FROM app_meta WHERE key LIKE 'meals_%' OR key = 'feature_fun'",
-    # what each item cost per base unit on every trip in the last six months, and where
+    # what each item cost per base unit on every trip in the last year, and where (for price trends)
     "history": "SELECT i.ingredient_id, i.unit, i.qty, i.price, t.date, t.shop FROM meals.trip_items i "
-               "JOIN meals.trips t ON t.id = i.trip_id WHERE t.date >= CURRENT_DATE - 183 AND i.qty > 0 "
+               "JOIN meals.trips t ON t.id = i.trip_id WHERE t.date >= CURRENT_DATE - 400 AND i.qty > 0 "
                "AND i.ingredient_id IS NOT NULL ORDER BY t.date",
     "waste": "SELECT id, date, label, amount, unit, value, recipe_id FROM meals.waste "
              "WHERE date >= CURRENT_DATE - 400 ORDER BY date DESC, id DESC",

@@ -1,4 +1,5 @@
 from datetime import date, timedelta
+from urllib.parse import quote
 
 import pandas as pd
 import streamlit as st
@@ -63,7 +64,7 @@ def _rows(k, items, extras, cats, fallback):
 
 
 def _share_text(rows):
-    return "Shopping list\n" + "\n".join(f"- {r['name']}: {_qty_label(r['amount'], r['unit'])}" for r in rows)
+    return "🛒 Shopping list\n" + "\n".join(f"- {r['name']}: {_qty_label(r['amount'], r['unit'])}" for r in rows)
 
 
 def _line(k, row, amount, price, category):
@@ -128,16 +129,73 @@ def _table(k, rows, sig, cats):
 
 
 # ---- prices: what things cost, and where it's cheaper ------------------------------------------------
+# reference categorical slots 1-4 (validated for colour blindness), stepped separately for each theme
+TREND_COLORS = {"light": ["#2a78d6", "#eb6834", "#1baf7a", "#eda100"],
+                "dark": ["#3987e5", "#d95926", "#199e70", "#c98500"]}
+
+
+def _scale(k, ing, base):
+    """Prices are stored per gram / ml / piece; show them per bag, per kg, per crate…"""
+    pack = k.pack(ing)
+    if pack and pack[2] == base:
+        return pack[1], pack[0]
+    usual = k.unit_of.get(ing, base)
+    return to_base(1, usual)[0], usual
+
+
+def _trend(k):
+    """What staples have cost, month by month, from saved shopping trips."""
+    import altair as alt
+
+    h = k.history.assign(month=pd.to_datetime(k.history["date"]).dt.to_period("M"))
+    series = {}
+    for (ing, base), g in h.groupby(["ingredient_id", "unit"]):
+        if g["month"].nunique() < 2:
+            continue
+        scale, per = _scale(k, int(ing), base)
+        name = f"{k.names.get(int(ing), '?')} (per {per})"
+        series[name] = (g.groupby("month")["per_unit"].mean() * scale, len(g))
+    if not series:
+        st.caption("Price trends appear once you've bought the same item in two different months.")
+        return
+    by_use = sorted(series, key=lambda n: -series[n][1])
+    picked = st.multiselect("Items", by_use, default=by_use[:3], max_selections=4, key="meal_trend_items",
+                            placeholder="Pick up to 4 items", label_visibility="collapsed")
+    if not picked:
+        return
+    rows = [{"Item": n, "Month": m.to_timestamp(), "Price": round(float(v), 2)}
+            for n in picked for m, v in series[n][0].items()]
+    try:
+        mode = "dark" if st.context.theme.type == "dark" else "light"
+    except Exception:
+        mode = "light"
+    base = alt.Chart(pd.DataFrame(rows)).encode(
+        x=alt.X("Month:T", axis=alt.Axis(title=None, format="%b %y", tickCount="month", grid=False)),
+        y=alt.Y("Price:Q", axis=alt.Axis(title=None, tickCount=4, domain=False, ticks=False, format=",.0f")),
+        color=alt.Color("Item:N", scale=alt.Scale(domain=picked, range=TREND_COLORS[mode][:len(picked)]),
+                        legend=alt.Legend(title=None, orient="top", direction="vertical", labelLimit=260)
+                        if len(picked) > 1 else None),  # one line needs no legend: the picker names it
+    )
+    lines = base.mark_line(strokeWidth=2, interpolate="monotone")
+    points = base.mark_point(size=64, filled=True).encode(
+        tooltip=["Item:N", alt.Tooltip("Month:T", format="%B %Y"),
+                 alt.Tooltip("Price:Q", title=f"Average price ({CURRENCY})", format=",.2f")])
+    chart = (lines + points).properties(height=240).configure_view(strokeWidth=0) \
+        .configure(background="transparent")
+    st.altair_chart(chart, width="stretch")
+    st.caption("Average price paid each month. The table below has the last price, the change since the trip "
+               "before, and where it's cheapest.")
+
+
 def _prices(k):
     h = k.history
     if not len(h):
         empty("Prices show here after your first saved shopping trip.")
         return
+    _trend(k)
     out = []
     for (ing, base), g in h.groupby(["ingredient_id", "unit"]):
-        pack = k.pack(ing)
-        per_label = pack[0] if pack and pack[2] == base else k.unit_of.get(ing, base)
-        scale = pack[1] if pack and pack[2] == base else to_base(1, per_label)[0]
+        scale, per_label = _scale(k, int(ing), base)
         last = float(g["per_unit"].iloc[-1]) * scale
         prev = float(g["per_unit"].iloc[-2]) * scale if len(g) > 1 else None
         shops = g.dropna(subset=["shop"]).groupby("shop")["per_unit"].mean() * scale
@@ -202,9 +260,13 @@ def render():
                 st.caption(f"Estimated cost of the whole list from past prices: about {money(sum(known))}"
                            + (f" (no price yet for {len(rows) - len(known)})" if len(known) < len(rows) else ""))
             if rows:
+                text = _share_text(rows)
+                st.link_button("Send the list on WhatsApp", "https://wa.me/?text=" + quote(text),
+                               icon=":material/send:", width="stretch",
+                               help="Opens WhatsApp with the list typed in. Pick who to send it to.")
                 with st.expander("Share the list", icon=":material/share:"):
-                    st.code(_share_text(rows), language=None)
-                    st.caption("Tap the copy icon, then paste into WhatsApp or a note.")
+                    st.code(text, language=None)
+                    st.caption("Tap the copy icon, then paste into a note or any other app.")
 
     with right:
         with card("meal-shop-save"):
@@ -217,7 +279,7 @@ def render():
                 ss.setdefault("meal_trip_acct", b.default_account("Expense"))
                 if ss.get("meal_trip_acct") not in accounts:
                     ss["meal_trip_acct"] = accounts[0] if accounts else None
-                st.pills("Paid from", accounts, key="meal_trip_acct")
+                st.pills("Paid from", accounts, key="meal_trip_acct", required=True)
                 shops = k.shops()
                 shop = st.selectbox("Where (optional)", shops, index=None, accept_new_options=True, key="meal_trip_shop",
                                     placeholder="e.g. Makola, Shoprite")

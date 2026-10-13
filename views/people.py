@@ -164,10 +164,15 @@ def _reminders():
     with card("reminders"):
         section("What gets sent")
         st.write("Every morning at 6:00: today's meals, prep and shopping to do, leftovers to eat, low stock and "
-                 "safe to spend. In the evening, only when something needs doing tonight.")
+                 "safe to spend. In the evening, only when something needs doing tonight. On the 1st of each month, "
+                 "a short report on the month before.")
         k, b = kitchen(), money_book()
         now = datetime.now()
-        tab_m, tab_e, tab_s = st.tabs(["Morning preview", "Evening preview", "Set up"])
+        tab_m, tab_e, tab_r, tab_s = st.tabs(["Morning preview", "Evening preview", "Monthly report", "Set up"])
+        with tab_r:
+            from core.report import monthly
+            st.caption("Sent on the 1st of each month, about the month before.")
+            st.html(f'<div class="tg-preview">{_as_html(monthly(b, k if b.feature("kitchen") else None, now.date()))}</div>')
         with tab_m:
             st.html(f'<div class="tg-preview">{_as_html(morning(k, b, now, food_budget_left(b, k, now.date())))}</div>')
         with tab_e:

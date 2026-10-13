@@ -2,6 +2,7 @@
 
     DATABASE_URL=... TELEGRAM_BOT_TOKEN=... TELEGRAM_CHAT_ID=... python notify.py morning
     DATABASE_URL=... TELEGRAM_BOT_TOKEN=... TELEGRAM_CHAT_ID=... python notify.py evening
+    DATABASE_URL=... TELEGRAM_BOT_TOKEN=... TELEGRAM_CHAT_ID=... python notify.py monthly   (last month's report)
 
 TELEGRAM_CHAT_ID can list several chats separated by commas (each person, or one family group).
 Add --dry-run to print the message instead of sending it.
@@ -37,6 +38,9 @@ def build(mode, conn, now=None):
     if mode == "evening":
         return evening(k, now)
     book = Book(load_money(conn))
+    if mode == "monthly":
+        from core.report import monthly
+        return monthly(book, k if book.feature("kitchen") else None, now.date())
     return morning(k, book, now, food_budget_left(book, k, now.date()))
 
 
@@ -90,8 +94,8 @@ def send(text, token, chat_ids, api=None):
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     mode = args[0] if args else "morning"
-    if mode not in ("morning", "evening"):
-        sys.exit("Use: python notify.py morning|evening [--dry-run]")
+    if mode not in ("morning", "evening", "monthly"):
+        sys.exit("Use: python notify.py morning|evening|monthly [--dry-run]")
     url = os.environ.get("DATABASE_URL")
     if not url:
         sys.exit("DATABASE_URL is not set.")

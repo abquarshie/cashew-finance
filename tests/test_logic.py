@@ -293,6 +293,17 @@ def test_half_portions_and_fractions():
     assert qfmt(1.5, "pcs") == "1½" and qfmt(0.5, "crate") == "½ crate" and qfmt(2.5, "bunch") == "2½ bunches"
 
 
+def test_price_rises_compare_month_to_month():
+    import pandas as pd
+    from core.report import price_rises
+    h = pd.DataFrame([{"ingredient_id": 1, "unit": "pcs", "per_unit": 2.0, "date": date(2026, 8, 5)},
+                      {"ingredient_id": 1, "unit": "pcs", "per_unit": 2.5, "date": date(2026, 9, 3)},
+                      {"ingredient_id": 2, "unit": "g", "per_unit": 0.02, "date": date(2026, 8, 5)},
+                      {"ingredient_id": 2, "unit": "g", "per_unit": 0.0201, "date": date(2026, 9, 9)}])
+    rises = price_rises(h, pd.Period("2026-09", "M"), {1: "Eggs", 2: "Rice"})
+    assert [(n, round(c, 2)) for n, _, _, c in rises] == [("Eggs", 0.25)], "rice barely moved"
+
+
 def test_shopping_amounts_you_can_actually_buy():
     needs = {(10, "pcs"): {"qty": 5.88, "short": 5.88, "for": []}, (11, "g"): {"qty": 38.75, "short": 38.75, "for": []},
              (12, "g"): {"qty": 1625.0, "short": 1625.0, "for": []}}
@@ -322,6 +333,31 @@ def test_repeating_last_week_fills_both_weeks_once():
     assert (D + timedelta(days=1), "Lunch") not in got, "a planned meal is left alone"
     assert got[(D + timedelta(days=8), "Lunch")] == 4, "...and repeated a week later"
     assert ml.repeat_plan(old + plan(*new), D) == [], "nothing left to copy afterwards"
+
+
+def test_jokes_name_whats_actually_short():
+    from datetime import datetime
+    from meals.quips import LINES, joke
+    for kind in LINES:  # every line works with the names given, and none is left with a {placeholder}
+        for i in range(30):
+            j = joke(kind, D + timedelta(days=i), dish="light soup", item="tomatoes")
+            assert j and "{" not in j
+    assert "{" not in joke("missing", D), "lines that need a name are skipped when there isn't one"
+    e = plan({"id": 1, "day": D, "slot": "Supper", "recipe_id": 2, "qty": 4})
+    notes = ml.reminders(datetime(2026, 10, 12, 8, 0), e, RECIPES, ITEMS, {}, [], {10: "Onions"}, 4, fun=True)
+    buy = next(t for _, t in notes if "Buy before cooking" in t)
+    assert "jollof" not in buy.lower(), "the joke never names a dish that isn't short"
+
+
+def test_month_so_far_compares_the_same_days(book_now):
+    b = book_now
+    import pandas as pd
+    this = pd.Period(date.today(), "M")
+    full = b.month_totals(this - 1)
+    part = b.month_totals(this - 1, upto_day=1)
+    assert part[1] <= full[1]
+    from ui.components import change_pill
+    assert "▲ 20% vs 1–13 Sep" in change_pill(120, 100, versus="1–13 Sep")
 
 
 def test_budget_guard_looks_ahead():
@@ -405,6 +441,9 @@ def test_phone_messages(conn):
     assert "<script" not in text
     msg = evening(k, datetime.now())
     assert msg is None or msg.startswith("🌙 <b>For tomorrow")
+    from core.report import monthly
+    report = monthly(b, k, date.today())
+    assert report.startswith("📊 <b>") and "In GH₵" in report and "Budgets" in report and "<script" not in report
 
 
 def test_notify_sends_to_every_chat():

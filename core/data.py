@@ -256,9 +256,18 @@ class Book:
         sums = t[t["type"].isin(["Income", "Expense"])].groupby(["month", "type"])["amount"].sum()
         return sums.to_dict()
 
-    def month_totals(self, period):
-        mt = self._month_totals
-        return float(mt.get((period, "Income"), 0.0)), float(mt.get((period, "Expense"), 0.0))
+    def month_totals(self, period, upto_day=None):
+        """(income, expenses) for a month. upto_day=12 counts only the 1st to the 12th, so this month so far
+        can be compared fairly with the same days of last month."""
+        if upto_day is None:
+            mt = self._month_totals
+            return float(mt.get((period, "Income"), 0.0)), float(mt.get((period, "Expense"), 0.0))
+        t = self.tx
+        if not len(t):
+            return 0.0, 0.0
+        t = t[(t["month"] == period) & (pd.to_datetime(t["date"]).dt.day <= upto_day)]
+        return (float(t.loc[t["type"] == "Income", "amount"].sum()),
+                float(t.loc[t["type"] == "Expense", "amount"].sum()))
 
     def month_expenses(self, period):
         if not len(self.tx):

@@ -123,6 +123,7 @@ div.st-key-card-savebar { position: sticky; bottom: 14px; z-index: 20; border-co
 .today-note { margin-top: .5rem; padding: .55rem .7rem; border-radius: 12px; font-size: .84rem; line-height: 1.45;
   background: var(--accent-soft); }
 .today-note.warn { background: var(--warn-soft); }
+.today-also { color: var(--muted); font-size: .8rem; line-height: 1.45; padding: .4rem 0 0; border-top: 1px solid var(--line); }
 .week-head { color: var(--muted); font-size: .8rem; font-weight: 700; margin: .2rem 0 .1rem; }
 div[class*="st-key-add_open_"] button { min-height: 3rem; font-size: 1.02rem; border-radius: 14px; }
 

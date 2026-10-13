@@ -107,9 +107,9 @@ def _add_form():
     if ss.get("meal_add_day") not in days:
         ss["meal_add_day"] = days[0]
     ss.setdefault("meal_add_slot", _next_slot())
-    st.pills("Day", days, key="meal_add_day", format_func=lambda d: "Today" if d == today else (
+    st.pills("Day", days, key="meal_add_day", required=True, format_func=lambda d: "Today" if d == today else (
         "Tomorrow" if d == today + timedelta(days=1) else f"{d:%a %d}"))
-    st.pills("Meal", SLOTS, key="meal_add_slot")
+    st.pills("Meal", SLOTS, key="meal_add_slot", required=True)  # tapping the picked one again keeps it
     what = st.segmented_control("What", ["Recipe", "Fruit or other item"], default="Recipe", key="meal_add_what",
                                 label_visibility="collapsed") or "Recipe"
     day, slot = ss.get("meal_add_day") or days[0], ss.get("meal_add_slot") or "Supper"

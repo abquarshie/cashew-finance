@@ -425,7 +425,8 @@ def reminders(now, entries, recipes, items, pantry, fridge, names, household, lo
             when = "now" if start <= now else f"by {start:%a %H:%M}"
             day_word = "today's" if e["day"] == today else "tomorrow's"
             text = f"{r['prep_note']} {when}, for {day_word} {e['slot'].lower()} ({r['name']})."
-            out.append(("warn" if start <= now else "info", with_joke("prep", text, today, e.get("id"), fun)))
+            out.append(("warn" if start <= now else "info",
+                        with_joke("prep", text, today, e.get("id"), fun, dish=r["name"].lower())))
 
     # leftovers in the fridge that cover a planned meal
     in_fridge = defaultdict(float)
@@ -438,18 +439,24 @@ def reminders(now, entries, recipes, items, pantry, fridge, names, household, lo
             day_word = "Today's" if e["day"] == today else "Tomorrow's"
             text = (f"{day_word} {e['slot'].lower()}: {in_fridge[e['recipe_id']]:g} portions of {r['name']} "
                     "are already in the fridge, no need to cook.")
-            out.append(("ok", with_joke("leftovers", text, today, e.get("id"), fun)))
+            out.append(("ok", with_joke("leftovers", text, today, e.get("id"), fun, dish=r["name"].lower())))
 
     # ingredients missing for today's and tomorrow's cooking, after the stock is shared out
     missing = defaultdict(float)
-    for e in open_entries:
-        for ing, base, q in status.get(_key(e), {}).get("missing", []):
+    short_dish = None
+    for e in sorted(open_entries, key=_when):
+        lines = status.get(_key(e), {}).get("missing", [])
+        if lines and short_dish is None:
+            short_dish = (recipes.get(e.get("recipe_id"), {}).get("name") or names.get(e.get("ingredient_id")) or "")
+        for ing, base, q in lines:
             missing[(ing, base)] += q
     if missing:
         rows = list(missing.items())
         listed = ", ".join(f"{fmt(q, base)} {names.get(ing, '?')}".replace(" pcs", "") for (ing, base), q in rows[:6])
         more = f" and {len(rows) - 6} more" if len(rows) > 6 else ""
-        out.append(("warn", with_joke("missing", f"Buy before cooking: {listed}{more}.", today, "", fun)))
+        first_item = names.get(rows[0][0][0], "").lower()
+        fields = {k: v for k, v in (("dish", (short_dish or "").lower()), ("item", first_item)) if v}
+        out.append(("warn", with_joke("missing", f"Buy before cooking: {listed}{more}.", today, "", fun, **fields)))
 
     # fridge food going off or running low
     for b in sorted(fridge, key=lambda b: b["eat_by"]):
@@ -461,7 +468,7 @@ def reminders(now, entries, recipes, items, pantry, fridge, names, household, lo
         elif flag == "soon":
             when = "today" if b["eat_by"] == today else "tomorrow"
             text = f"Eat the {frac(b['portions'])} {plural(unit, float(b['portions']))} of {b['label']} by {when}."
-            out.append(("warn", with_joke("eat_soon", text, today, b.get("id"), fun)))
+            out.append(("warn", with_joke("eat_soon", text, today, b.get("id"), fun, dish=str(b["label"]).lower())))
         elif flag == "low":
             text = (f"Only {frac(b['portions'])} {plural(unit, float(b['portions']))} of {b['label']} "
                     "left in the fridge.")

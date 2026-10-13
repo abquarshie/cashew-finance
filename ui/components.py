@@ -64,16 +64,16 @@ def kpi_grid(cards, cls=""):
     st.html(f'<div class="kpi-grid {cls}">{"".join(cards)}</div>')
 
 
-def change_pill(cur, prev, good_when_up=True):
-    """A small pill comparing with last month."""
+def change_pill(cur, prev, good_when_up=True, versus="last month"):
+    """A small pill comparing with last month (or, part-way through a month, the same days of last month)."""
     if prev == 0:
         return pill("New this month" if cur else "No data yet", "neutral")
     pct = (cur - prev) / abs(prev) * 100
     if abs(pct) < 0.5:
-        return pill("Same as last month", "neutral")
+        return pill(f"Same as {versus}", "neutral")
     up = pct > 0
     tone = "in" if up == good_when_up else "out"
-    return pill(f"{'▲' if up else '▼'} {abs(pct):.0f}% vs last month", tone)
+    return pill(f"{'▲' if up else '▼'} {abs(pct):.0f}% vs {versus}", tone)
 
 
 # ---- progress bars ------------------------------------------------------------

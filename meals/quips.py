@@ -12,29 +12,29 @@ LINES = {
     "prep": [
         "The beans won't soak themselves.",
         "Future you will say thank you.",
-        "Even the best jollof starts the day before.",
+        "Even the best {dish} starts the day before.",
         "Ten minutes now saves a hungry, cross house later.",
         "Your grandmother would have done this yesterday.",
-        "A frozen fish has never fried itself.",
+        "{dish} doesn't make itself, but you can give it a head start.",
     ],
     "leftovers": [
         "No cooking needed: the fridge has your back.",
         "Leftovers today, so the gas cylinder gets a rest.",
-        "Day-two stew always tastes better anyway.",
+        "Day-two {dish} always tastes better anyway.",
         "Heat it, eat it, wash one pot. Simple.",
     ],
     "missing": [
-        "The pot is ready but the ingredients are still at the market.",
-        "No onions, no stew. That's the law.",
-        "You can't cook jollof with good intentions alone.",
-        "Catch the market woman before she packs up.",
+        "The pot is ready. The {item}? Still at the market.",
+        "No {item}, no {dish}. That's the law.",
+        "You can't cook {dish} with good intentions alone.",
+        "Catch the market woman before she packs up: {dish} is counting on you.",
         "The recipe is willing, but the pantry is weak.",
     ],
     "eat_soon": [
-        "This one is giving 'eat me today' energy.",
+        "The {dish} is giving 'eat me today' energy.",
         "Don't let it become a science project at the back of the fridge.",
         "Eat it now, or the dustbin eats it later.",
-        "Waste not: that stew didn't cook itself.",
+        "Waste not: that {dish} didn't cook itself.",
     ],
     "past": [
         "Smell first. Then think. Then probably say goodbye.",
@@ -73,18 +73,27 @@ LINES = {
 }
 
 
-def joke(kind, day, key=""):
-    """The joke for this situation today. Same inputs, same joke."""
-    options = LINES.get(kind)
+def joke(kind, day, key="", **fields):
+    """The joke for this situation today. Same inputs, same joke.
+
+    Lines can name the dish or item ({dish}, {item}), so the joke is about what's actually short.
+    Lines needing a name that wasn't given are skipped."""
+    options = []
+    for line in LINES.get(kind, []):
+        try:
+            options.append(line.format(**fields))
+        except (KeyError, IndexError):
+            continue
     if not options:
         return ""
     seed = hashlib.sha256(f"{day}|{kind}|{key}".encode()).digest()
-    return options[seed[0] % len(options)]
+    out = options[seed[0] % len(options)]
+    return out[0].upper() + out[1:]
 
 
-def with_joke(kind, text, day, key="", on=True):
+def with_joke(kind, text, day, key="", on=True, **fields):
     """'<joke> <fact>' when fun reminders are on, otherwise just the fact."""
     if not on:
         return text
-    j = joke(kind, day, key)
+    j = joke(kind, day, key, **fields)
     return f"{j} {text}" if j else text

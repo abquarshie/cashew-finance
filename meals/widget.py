@@ -18,11 +18,22 @@ def today_card(link_to_plan=True):
     try:
         k = kitchen()
         s = today_summary(k, datetime.now())
+        meals = s["meals"]
+        if link_to_plan and len(meals) > 1:
+            # on Home: the next meal still to cook in full, the rest of the day on one line
+            nxt = next((m for m in meals if m[2] != "done"), meals[0])
+            full, rest = [nxt], [m for m in meals if m is not nxt]
+        else:
+            full, rest = meals, []
         rows = "".join(
             f'<div class="today-row {status}"><span class="today-slot">{esc(slot)}</span>'
             f'<span class="today-dish">{esc(name)}</span>'
             f'<span class="today-tag">{STATUS_ICON[status]} {esc(label)}</span></div>'
-            for slot, name, status, label in s["meals"])
+            for slot, name, status, label in full)
+        if rest:
+            also = ", ".join(f"{slot}: {name} {STATUS_ICON[status]}" for slot, name, status, _ in rest)
+            rows += f'<div class="today-also">Also today · {esc(also)}</div>'
+
         shown = [s["note"]] if link_to_plan and s["note"] else ([] if link_to_plan else s["notes"])
         note = "".join(f'<div class="today-note {TONE[tone]}">{esc(text)}</div>' for tone, text in shown)
         more = len(s["notes"]) - len(shown)

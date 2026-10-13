@@ -321,3 +321,24 @@ def test_reminder_settings_preview(desktop, app_url):
     sign_in(desktop, app_url, path="settings?tab_settings=Reminders")
     body = desktop.inner_text("body")
     assert "What gets sent" in body and "Good morning!" in body
+    desktop.get_by_role("tab", name="Monthly report").click()
+    settle(desktop)
+    assert "in Cashew" in desktop.inner_text("body")
+
+
+def test_whatsapp_and_price_trends(phone, app_url, conn):
+    eggs = ing_id(conn, "Eggs")
+    trip = q(conn, "INSERT INTO meals.trips (date, account, total, shop) VALUES (CURRENT_DATE - 45, 'Cash', 55, 'Makola') "
+                   "RETURNING id")[0][0]
+    q(conn, "INSERT INTO meals.trip_items (trip_id, ingredient_id, name, qty, unit, price, category) "
+            "VALUES (%s, %s, 'Eggs', 30, 'pcs', 55, 'Dairy/Cereal')", (trip, eggs))
+    q(conn, "INSERT INTO meals.plan (day, slot, recipe_id, qty) VALUES (CURRENT_DATE + 3, 'Supper', %s, 4)",
+      (recipe_id(conn, JOLLOF),))
+    sign_in(phone, app_url, path="shopping")
+    link = phone.get_by_role("link", name="Send the list on WhatsApp")
+    assert link.count() and link.get_attribute("href").startswith("https://wa.me/?text=")
+    phone.locator('[data-testid="stButtonGroup"]').get_by_text("Prices").click()
+    settle(phone, 2500)
+    no_errors(phone)
+    assert phone.locator('[data-testid="stVegaLiteChart"], .vega-embed').count() >= 1, "eggs bought in two months"
+    assert "Eggs (per crate)" in phone.inner_text("body")

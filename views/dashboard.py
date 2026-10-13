@@ -183,10 +183,17 @@ def render():
     period = st.selectbox("Month", b.months(), format_func=lambda p: p.strftime("%B %Y"), key="dash_month",
                           label_visibility="collapsed")
     inc, exp = b.month_totals(period)
-    p_inc, p_exp = b.month_totals(period - 1)
+    if period == pd.Period(date.today(), "M"):  # part-way through the month: compare the same days of last month
+        p_inc, p_exp = b.month_totals(period - 1, upto_day=date.today().day)
+        prev = period - 1
+        last = min(date.today().day, prev.days_in_month)
+        versus = f"1–{last} {prev.strftime('%b')}"  # e.g. "1–13 Sep": the same days of last month
+    else:
+        p_inc, p_exp = b.month_totals(period - 1)
+        versus = "last month"
     kpi_grid([
-        kpi_html("Income", money(inc), change_pill(inc, p_inc)),
-        kpi_html("Expenses", money(exp), change_pill(exp, p_exp, good_when_up=False)),
+        kpi_html("Income", money(inc), change_pill(inc, p_inc, versus=versus)),
+        kpi_html("Expenses", money(exp), change_pill(exp, p_exp, good_when_up=False, versus=versus)),
     ], cls="two")
     _more_stats(b, period)
 
