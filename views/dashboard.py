@@ -5,8 +5,8 @@ import pandas as pd
 import streamlit as st
 
 from core.data import CURRENCY, book, money
-from ui.components import (activity_items, budget_html, card, change_pill, empty, esc, feed_html, field_msg, kpi_grid,
-                           kpi_html, page_header, pill, progress_html, section)
+from ui.components import (activity_items, budget_html, change_pill, empty, esc, feed_html, field_msg, kpi_grid,
+                           kpi_html, page_header, pill, progress_html)
 from ui.entry import add_button
 from meals.widget import today_card
 from ui.nav import drawer, link
@@ -218,8 +218,8 @@ def _month_figures(b):
 
 
 def _activity(b):
-    with card("activity"):
-        section("Recent activity")
+    """The last five entries, folded away until tapped."""
+    with st.expander("Recent activity", icon=":material/history:"):
         items = activity_items(b, limit=5)
         if items:
             st.html(feed_html(items, show_who=b.multi_member, names=b.name_of_user if len(b.users) > 1 else None))

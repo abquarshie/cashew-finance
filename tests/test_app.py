@@ -101,7 +101,11 @@ def test_dashboard_layout(phone, app_url):
 
     assert phone.get_by_role("button", name="Add an entry").is_visible()
     assert not amount_box(phone).count(), "the form only appears when Add is tapped"
-    assert phone.get_by_text("See all transactions").is_visible(), "recent activity is always there"
+    activity = phone.locator('[data-testid="stExpander"]').filter(has_text="Recent activity")
+    assert not phone.get_by_text("See all transactions").is_visible(), "recent activity starts folded"
+    activity.locator("summary").click()
+    settle(phone)
+    assert phone.get_by_text("See all transactions").is_visible(), "one tap opens it"
     budgets = phone.locator('[data-testid="stExpander"]').filter(has_text="Budgets and spending")
     assert not phone.locator(".prog-list").first.is_visible()
     budgets.locator("summary").click()
