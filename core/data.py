@@ -299,6 +299,18 @@ class Book:
             out.append({"name": key, "limit": limit, "spent": spent, "pct": pct, "is_group": key in groups})
         return sorted(out, key=lambda b: b["pct"], reverse=True)
 
+    def budget_total(self, period):
+        """All of a month's budgets added up: {"limit", "spent", "left"}, or None when no budgets are set.
+        A category budget inside a group that has its own budget is left out, so nothing is counted twice."""
+        status = self.budget_status(period)
+        if not status:
+            return None
+        groups = {s["name"] for s in status if s["is_group"]}
+        counted = [s for s in status if s["is_group"] or self.group_of.get(s["name"]) not in groups]
+        limit = sum(s["limit"] for s in counted)
+        spent = sum(s["spent"] for s in counted)
+        return {"limit": limit, "spent": spent, "left": limit - spent}
+
     # ---- safe to spend ---------------------------------------------------------
     @cached_property
     def everyday_accounts(self):

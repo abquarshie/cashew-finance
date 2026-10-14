@@ -756,3 +756,36 @@ def test_loaded_data_is_in_order_whatever_the_database_returns(conn):
 
 
 import pandas as pd  # noqa: E402
+
+
+def test_budget_total_counts_each_cedi_once(conn):
+    period = pd.Period(date.today(), "M")
+    b = Book(_load_frames(conn))
+    t = b.budget_total(period)
+    status = b.budget_status(period)
+    groups = {s["name"] for s in status if s["is_group"]}
+    counted = [s for s in status if s["is_group"] or b.group_of.get(s["name"]) not in groups]
+    assert len(counted) < len(status), "the sample data budgets Dining Out inside Food"
+    assert t["limit"] == pytest.approx(sum(s["limit"] for s in counted))
+    assert t["left"] == pytest.approx(t["limit"] - t["spent"])
+    # a budget for one category inside the Food group is already part of Food's budget
+    inside = q(conn, "SELECT name FROM categories WHERE group_name = 'Food' LIMIT 1")[0][0]
+    q(conn, "INSERT INTO budgets VALUES (%s, 50)", (inside,))
+    try:
+        assert Book(_load_frames(conn)).budget_total(period) == pytest.approx(t)
+    finally:
+        q(conn, "DELETE FROM budgets WHERE category = %s", (inside,))
+
+
+def test_missing_ingredients_show_amounts():
+    from types import SimpleNamespace
+
+    from meals.briefing import missing_text
+    from meals.units import to_base
+    cups, base = to_base(2, "cup")
+    k = SimpleNamespace(names={1: "Kokonte powder", 2: "Onion", 3: "Salt", 4: "Pepper", 5: "Okro"},
+                        unit_of={1: "cup", 2: "pcs"})
+    assert missing_text(k, [(1, base, cups)]) == "2 cups Kokonte powder"
+    # the same item short for two dishes in one meal is added up
+    assert missing_text(k, [(2, "pcs", 1), (2, "pcs", 2)]) == "3 Onion"
+    assert missing_text(k, [(i, "pcs", 1) for i in (2, 3, 4, 5)]).endswith(" +1")

@@ -34,6 +34,7 @@ PAGES = [
     ("Money", sections.plan, "Budgets & goals", ":material/donut_small:", "budgets"),
     ("Kitchen", sections.kitchen, "Meals", ":material/restaurant:", "meals"),
     ("Kitchen", meal_shopping.render, "Shopping list", ":material/shopping_cart:", "shopping"),
+    ("Kitchen", sections.pantry, "Pantry / Inventory", ":material/inventory_2:", "pantry"),
     ("Settings", sections.settings, "Settings", ":material/settings:", "settings"),
 ]
 # Old addresses (bookmarks, links in messages) still open the right place.

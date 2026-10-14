@@ -77,7 +77,7 @@ def _fridge(k):
             st.rerun()
 
 
-def _pantry(k):
+def pantry_table(k):
     ss = st.session_state
     keys = {(int(i), base_of(u)) for i, u in zip(k.ingredients["id"], k.ingredients["unit"])} | set(k.pantry)
     keys = {key for key in keys if key[0] not in k.supplies}  # household supplies have their own tab
@@ -147,7 +147,7 @@ def render():
                     f'of food thrown away ({amount:g} portions{f", about {money(value)}" if value else ""}).</div>')
         _fridge(k)
     with tab_p:
-        _pantry(k)
+        pantry_table(k)
     with tab_s:
         with card("meal-settings"):
             section("People eating at each meal")

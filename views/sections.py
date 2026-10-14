@@ -37,6 +37,15 @@ def kitchen():
     ])
 
 
+def pantry():
+    """The pantry stock table on its own page, one tap from the menu."""
+    from meals.data import kitchen
+    from meals.pages.fridge import pantry_table
+    from ui.components import page_header
+    page_header("Pantry / Inventory", "What's in stock. Type a new number to correct it.")
+    pantry_table(kitchen())
+
+
 def settings():
     from views import people, setup
     user = st.session_state["user"]

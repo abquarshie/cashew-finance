@@ -87,7 +87,7 @@ def test_owner_signs_up_and_stays_signed_in(phone, app_url, conn):
 def test_dashboard_layout(phone, app_url):
     sign_in(phone, app_url)
     hero = phone.locator(".hero")
-    assert "Safe to spend until payday" in hero.inner_text(), "one big number at the top"
+    assert "Total budget left" in hero.inner_text(), "one big number at the top: what's left of this month's budgets"
     tiles = phone.locator(".kpi-grid .kpi")
     assert [tiles.nth(i).locator(".kpi-label").inner_text() for i in range(tiles.count())] == ["Income", "Expenses"]
 
@@ -111,11 +111,12 @@ def test_dashboard_layout(phone, app_url):
     open_menu(phone)
     sidebar = phone.locator('[data-testid="stSidebar"]')
     links = [t.strip().split("\n")[-1] for t in sidebar.locator('[data-testid="stSidebarNav"] a').all_inner_texts()]
-    assert links == ["Home", "Transactions", "Budgets & goals", "Meals", "Shopping list", "Settings"], links
+    assert links == ["Home", "Transactions", "Budgets & goals", "Meals", "Shopping list", "Pantry / Inventory",
+                     "Settings"], links
     sidebar.get_by_text("More stats").click()
     settle(phone, 2000)
     side = sidebar.inner_text()
-    for tile in ("In all accounts", "Net balance", "Savings rate", "Budgets at risk", "Next auto entry", "Income and expenses, 6 months"):
+    for tile in ("Safe to spend until payday", "In all accounts", "Net balance", "Savings rate", "Budgets at risk", "Next auto entry", "Income and expenses, 6 months"):
         assert tile in side
     assert sidebar.locator('[data-testid="stVegaLiteChart"], .vega-embed').count() >= 1
 
@@ -408,7 +409,7 @@ def test_switching_parts_off(desktop, app_url, conn):
         [("feature_goals", "off"), ("feature_kitchen", "off")]
     open_app(desktop, app_url)
     nav = desktop.locator('[data-testid="stSidebarNav"]').inner_text()
-    assert "Meals" not in nav and "Shopping list" not in nav
+    assert "Meals" not in nav and "Shopping list" not in nav and "Pantry" not in nav
     assert not desktop.locator(".st-key-card-meal-line").count()
     open_app(desktop, app_url, "budgets")
     assert "Goals" not in desktop.locator('[data-testid="stMain"]').inner_text()[:300]
@@ -426,3 +427,21 @@ def test_an_ended_session_signs_the_browser_out(phone, app_url, conn):
     settle(phone, 2500)
     assert "Keep me signed in" in phone.inner_text("body"), "back to the sign-in screen"
     assert "You've been signed out" in toasts(phone)
+
+
+def test_the_banner_turns_red_when_budgets_are_overspent(phone, app_url, conn):
+    limits = q(conn, "SELECT category, monthly_limit FROM budgets")
+    q(conn, "UPDATE budgets SET monthly_limit = 1")
+    try:
+        phone.wait_for_timeout(1500)  # the app's data refreshes every second in tests
+        sign_in(phone, app_url)
+        hero = phone.locator(".hero")
+        assert "over" in hero.get_attribute("class"), "dark red once the month's budgets are used up"
+        text = hero.inner_text()
+        assert "Total budget left" in text and "−GH₵" in text, text
+        green = "rgb(15, 61, 58)"
+        assert phone.evaluate("getComputedStyle(document.querySelector('.hero')).backgroundColor") != green
+    finally:
+        for cat, limit in limits:
+            q(conn, "UPDATE budgets SET monthly_limit = %s WHERE category = %s", (limit, cat))
+

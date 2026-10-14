@@ -8,7 +8,7 @@ LIGHT = {
     "in": "#15824F", "in-soft": "#E1F3E9", "out": "#C93C33", "out-soft": "#FCE9E7",
     "warn": "#9A6400", "warn-soft": "#FCF1DC", "neutral-soft": "#EDF1F3", "bar": "#E8EEF0",
     "feature": "#0F3D3A", "feature-text": "#FFFFFF", "feature-muted": "#A8CFC8",
-    "feature-in": "#7EE0B5", "feature-out": "#FFB4A8",
+    "feature-in": "#7EE0B5", "feature-out": "#FFB4A8", "feature-over": "#5C1A26", "feature-over-muted": "#E8B4BC",
     "shadow": "0 1px 2px rgba(15,27,34,.05), 0 6px 20px -6px rgba(15,27,34,.10)",
 }
 DARK = {
@@ -17,7 +17,7 @@ DARK = {
     "in": "#4CD39A", "in-soft": "#12301F", "out": "#FF8A80", "out-soft": "#3A1B19",
     "warn": "#F2C266", "warn-soft": "#3A2E14", "neutral-soft": "#202A2E", "bar": "#253035",
     "feature": "#0F3D3A", "feature-text": "#FFFFFF", "feature-muted": "#9CC8C0",
-    "feature-in": "#7EE0B5", "feature-out": "#FFB4A8",
+    "feature-in": "#7EE0B5", "feature-out": "#FFB4A8", "feature-over": "#4A1520", "feature-over-muted": "#E0A9B2",
     "shadow": "0 0 0 1px rgba(255,255,255,.02)",
 }
 
@@ -72,7 +72,7 @@ div.st-key-card-savebar { position: sticky; bottom: 14px; z-index: 20; border-co
 .kpi-sub { font-size: .76rem; color: var(--muted); font-weight: 600; line-height: 1.35; }
 
 
-/* ---- Home: safe to spend is the one big number ---- */
+/* ---- Home: what's left of this month's budgets is the one big number ---- */
 .hero { background: var(--feature); border-radius: 20px; padding: 1.15rem 1.3rem 1.2rem; position: relative; overflow: hidden;
   margin-bottom: .2rem; }
 .hero::after { content: ""; position: absolute; right: -50px; top: -70px; width: 210px; height: 210px; border-radius: 50%;
@@ -80,8 +80,9 @@ div.st-key-card-savebar { position: sticky; bottom: 14px; z-index: 20; border-co
 .hero-label { color: var(--feature-muted); font-size: .84rem; font-weight: 650; position: relative; z-index: 1; }
 .hero-value { color: var(--feature-text); font-size: 2.6rem; font-weight: 850; letter-spacing: -.035em; line-height: 1.1;
   margin: .25rem 0 .3rem; font-variant-numeric: tabular-nums; position: relative; z-index: 1; }
-.hero-value.neg { color: var(--feature-out); }
-.hero-sub { color: var(--feature-in); font-size: .86rem; font-weight: 650; position: relative; z-index: 1; }
+.hero.over { background: var(--feature-over); }
+.hero.over .hero-label { color: var(--feature-over-muted); }
+.hero-value.none { font-size: 1.5rem; margin: .45rem 0 .1rem; }
 .kpi-grid.two { grid-template-columns: 1fr 1fr; }
 .bal-rows { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); column-gap: 1.4rem; margin: 0 0 .3rem; }
 .bal-row { display: flex; justify-content: space-between; gap: .6rem; font-size: .9rem; padding: .4rem 0;
@@ -93,18 +94,16 @@ div.st-key-card-savebar { position: sticky; bottom: 14px; z-index: 20; border-co
 .bal-row b.neg { color: var(--out); }
 /* ---- Today card: what to cook and whether it's all in ---- */
 .today-head { font-size: 1rem; font-weight: 750; letter-spacing: -.01em; margin-bottom: .35rem; }
-.today-row { display: grid; grid-template-columns: 4.6rem 1fr; column-gap: .6rem; padding: .4rem 0;
-  border-top: 1px solid var(--line); font-size: .9rem; }
-.today-slot { color: var(--muted); font-size: .76rem; font-weight: 700; padding-top: .1rem; }
+.today-row { padding: .45rem 0; border-top: 1px solid var(--line); font-size: .9rem; line-height: 1.35; }
+.today-slot { color: var(--muted); font-weight: 700; }
 .today-dish { font-weight: 650; min-width: 0; }
-.today-tag { grid-column: 2; color: var(--muted); font-size: .78rem; font-weight: 600; }
+.today-tag { color: var(--muted); font-size: .78rem; font-weight: 600; margin-top: .1rem; }
 .today-row.short .today-tag { color: var(--warn); }
 .today-row.ready .today-tag, .today-row.leftovers .today-tag { color: var(--in); }
 .today-row.done .today-dish { color: var(--muted); text-decoration: line-through; }
 .today-note { margin-top: .5rem; padding: .55rem .7rem; border-radius: 12px; font-size: .84rem; line-height: 1.45;
   background: var(--accent-soft); }
 .today-note.warn { background: var(--warn-soft); }
-.today-also { color: var(--muted); font-size: .8rem; line-height: 1.45; padding: .4rem 0 0; border-top: 1px solid var(--line); }
 .bought-row { font-size: .95rem; line-height: 1.4; padding: .35rem 0; min-width: 0; }
 .week-head { color: var(--muted); font-size: .8rem; font-weight: 700; margin: .2rem 0 .1rem; }
 div[class*="st-key-add_open_"] button { min-height: 3rem; font-size: 1.02rem; border-radius: 14px; }

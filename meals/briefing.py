@@ -28,10 +28,18 @@ def entry_status(k, e, today):
         price, _ = k.bought_price(e)
         return "bought", "buy on the day" + (f", about GH₵{float(price) * float(e['qty']):,.0f}" if price else "")
     if m["status"] == "short":
-        names = [k.names.get(ing, "?") for ing, _, _ in m["missing"]]
-        listed = ", ".join(names[:3]) + (f" +{len(names) - 3}" if len(names) > 3 else "")
-        return "short", f"missing {listed}"
+        return "short", "missing " + missing_text(k, m["missing"])
     return "ready", "all in"
+
+
+def missing_text(k, missing, most=3):
+    """What a meal is short of, with amounts: '2 cups Kokonte powder, 3 Onions +1'.
+    missing: [(ingredient, base unit, quantity)]; the same item from two dishes is added up."""
+    total = {}
+    for ing, base, q in missing:
+        total[(ing, base)] = total.get((ing, base), 0.0) + float(q)
+    parts = [f"{fmt(q, base, k.unit_of.get(ing))} {k.names.get(ing, '?')}".strip() for (ing, base), q in total.items()]
+    return ", ".join(parts[:most]) + (f" +{len(parts) - most}" if len(parts) > most else "")
 
 
 def meal_state(k, parts, today):
@@ -42,15 +50,14 @@ def meal_state(k, parts, today):
     states, missing = [], []
     for e in parts:
         status, label = entry_status(k, e, today)
-        m = k.meal_status(e["id"], today) or {}
-        names = [k.names.get(ing, "?") for ing, _, _ in m.get("missing", [])] if status == "short" else []
-        missing += [n for n in names if n not in missing]
-        states.append((status, names))
+        short = (k.meal_status(e["id"], today) or {}).get("missing", []) if status == "short" else []
+        missing += short
+        states.append((status, [k.names.get(ing, "?") for ing, _, _ in short]))
     status = meal_status(states)
     if status == "done":
         return "done", "done"
     if status == "short":
-        return "short", "missing " + ", ".join(missing[:3]) + (f" +{len(missing) - 3}" if len(missing) > 3 else "")
+        return "short", "missing " + missing_text(k, missing)
     if status == "leftovers":
         return "leftovers", "from the fridge"
     if status == "bought":
@@ -65,7 +72,8 @@ def today_summary(k, now):
     """What to cook today and whether it's all in, plus the one reminder that matters most.
 
     Returns {"day", "meals": [(slot, name, status, label)], "note": (tone, text) or None,
-             "notes": every reminder for today and tomorrow}."""
+             "notes": every reminder for today and tomorrow (or the cheerful line when there are none),
+             "reminders": only the real reminders}."""
     today = now.date()
     meals = []
     for slot in SLOTS:
@@ -82,7 +90,7 @@ def today_summary(k, now):
         note = ("ok", with_joke("all_ready", "Everything for today's meals is in.", today, "", k.fun))
     else:
         note = None
-    return {"day": today, "meals": meals, "note": note, "notes": notes or ([note] if note else [])}
+    return {"day": today, "meals": meals, "note": note, "notes": notes or ([note] if note else []), "reminders": notes}
 
 
 def planned_cost(k, today, until=None):

@@ -7,7 +7,7 @@ import pytest
 
 from conftest import OWNER, q
 from core.auth import hash_password
-from helpers import chip, go, no_errors, open_app, settle, sign_in, tab, toasts
+from helpers import chip, go, no_errors, open_app, open_menu, settle, sign_in, tab, toasts
 
 pytestmark = pytest.mark.browser
 JOLLOF, REDRED = "Jollof rice with chicken", "Red red"
@@ -232,7 +232,8 @@ def test_dashboard_shows_todays_meals(phone, app_url, conn):
     sign_in(phone, app_url)
     card = phone.locator(".st-key-card-today").inner_text()
     assert JOLLOF in card and "Supper" in card, card
-    assert any(tag in card for tag in ("all in", "missing", "from the fridge")), "each dish says if it's in stock"
+    assert any(tag in card for tag in ("All in", "Missing:", "From the fridge")), "each dish says if it's in stock"
+    assert not phone.locator(".st-key-card-today .today-note").count(), "no reminder box on Home"
     assert phone.locator(".kpi-grid .kpi").count() == 2, "the money side is untouched by the kitchen"
     phone.locator(".st-key-card-today a").click()
     settle(phone, 2500)
@@ -273,6 +274,16 @@ def test_pantry_stocktake(desktop, app_url, conn):
     no_errors(desktop)
     body = desktop.inner_text("body")
     assert "Pantry" in body and ("low" in body.lower())
+
+
+def test_pantry_has_its_own_menu_link(phone, app_url, conn):
+    sign_in(phone, app_url)
+    open_menu(phone)
+    phone.locator('[data-testid="stSidebar"]').get_by_role("link", name="Pantry / Inventory").click()
+    settle(phone, 2500)
+    no_errors(phone)
+    assert "/pantry" in phone.url
+    assert phone.locator(".st-key-card-meal-pantry [data-testid='stDataFrame']").count() == 1, "the stock table, straight away"
 
 
 def test_market_mode_shop_and_price_changes(phone, app_url, conn):

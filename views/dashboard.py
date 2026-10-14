@@ -86,10 +86,15 @@ def _mini(label, value, sub="", wide=False):
 def _more_stats(b, period):
     """Secondary tiles, tucked into the sidebar behind a toggle."""
     slot = drawer()
-    on = slot.toggle("More stats", key="draft_more_stats", help="Total in all accounts, net balance, savings rate, budgets at risk, "
-                     "the next auto entry, spending by person, and income and expenses over 6 months.")
+    on = slot.toggle("More stats", key="draft_more_stats", help="Safe to spend until payday, total in all accounts, net balance, "
+                     "savings rate, budgets at risk, the next auto entry, spending by person, and income and expenses "
+                     "over 6 months.")
     if not on:
         return
+    s2s = b.safe_to_spend()
+    safe_sub = (f"About {money(max(s2s['per_day'], 0))} a day for {s2s['days']} day{'s' if s2s['days'] != 1 else ''}"
+                if s2s["safe"] > 0 else "Spending is ahead of what's coming in")
+    safe_tile = _mini(f"Safe to spend until payday, {s2s['payday']:%a %d %b}", money(s2s["safe"]), esc(safe_sub), wide=True)
     inc, exp = b.month_totals(period)
     p_inc, p_exp = b.month_totals(period - 1)
     balances = b.balances()
@@ -117,7 +122,7 @@ def _more_stats(b, period):
         when = "Today" if days <= 0 else ("Tomorrow" if days == 1 else f"{nxt['next_date']:%a %d %b}")
         next_tile = _mini("Next auto entry", when, esc(f"{nxt['name']}, {money(nxt['amount'])}"), wide=True)
 
-    tiles = [total_tile, net_tile, rate_tile, risk_tile, next_tile]
+    tiles = [safe_tile, total_tile, net_tile, rate_tile, risk_tile, next_tile]
 
     if b.multi_member:
         by_member = b.month_expenses(period).groupby("member")["amount"].sum().sort_values(ascending=False)
@@ -135,19 +140,20 @@ def _more_stats(b, period):
         st.altair_chart(_trend_chart(b, period, height=170), width="stretch")
 
 
-def _safe_tile(b):
-    """The one big number: what can be spent until payday."""
-    s2s = b.safe_to_spend()
-    if s2s["safe"] > 0:
-        sub = f"About {money(max(s2s['per_day'], 0))} a day for {s2s['days']} day{'s' if s2s['days'] != 1 else ''}"
-    else:
-        sub = "Spending is ahead of what's coming in"
-    neg = " neg" if s2s["safe"] < 0 else ""
-    return (f'<div class="hero"><div class="hero-label">Safe to spend until payday, {s2s["payday"]:%a %d %b}</div>'
-            f'<div class="hero-value{neg}">{money(s2s["safe"])}</div><div class="hero-sub">{sub}</div></div>'), s2s
+def _budget_tile(b):
+    """The one big number: what's left of this month's budgets. Dark red once it's overspent."""
+    period = pd.Period(date.today(), "M")
+    t = b.budget_total(period)
+    label = f"Total budget left · {period.strftime('%B')}"
+    if t is None:
+        return (f'<div class="hero"><div class="hero-label">{label}</div>'
+                f'<div class="hero-value none">No budgets set</div></div>')
+    over = " over" if t["left"] < 0 else ""
+    return (f'<div class="hero{over}"><div class="hero-label">{label}</div>'
+            f'<div class="hero-value">{money(t["left"])}</div></div>')
 
 
-def _balances(b, s2s):
+def _balances(b):
     """Every account, one tap below the big number."""
     balances = b.balances()
     total = float(balances.sum()) if len(balances) else 0.0
@@ -158,9 +164,6 @@ def _balances(b, s2s):
             f'<b class="{"neg" if v < 0 else ""}">{money(v)}</b></div>'
             for n, v in balances.items())
         st.html(f'<div class="bal-rows">{rows}</div>')
-        st.caption(f"Safe to spend is your everyday money ({money(s2s['money'])}) minus {money(s2s['bills'])} in "
-                   f"repeat bills before payday and {money(s2s['budget_left'])} still to spend in budgets. "
-                   "Savings accounts aren't counted.")
         unassigned = b.unassigned
         if unassigned:
             field_msg(f"{unassigned} older entr{'ies have' if unassigned != 1 else 'y has'} no account, so balances "
@@ -173,13 +176,29 @@ def render():
     name = (ss.get("user") or {}).get("name")
     page_header(f"Hello, {name}" if name else "Home")
 
-    hero, s2s = _safe_tile(b)
-    st.html(hero)
-    _balances(b, s2s)
-    add_button("home")
-    if b.feature("kitchen"):
-        today_card()
+    top_left, top_right = st.columns([1.25, 1], gap="medium")
+    with top_left:
+        st.html(_budget_tile(b))
+        _balances(b)
+        add_button("home")
+    with top_right:
+        if b.feature("kitchen"):
+            today_card()
+        else:
+            _activity(b)
 
+    low_left, low_right = st.columns([1.25, 1], gap="medium")
+    with low_left:
+        period = _month_figures(b)
+        _budgets(b, period)
+    if b.feature("kitchen"):
+        with low_right:
+            _activity(b)
+    _more_stats(b, period)
+
+
+def _month_figures(b):
+    """The month picker and that month's income and expenses. Returns the month picked."""
     period = st.selectbox("Month", b.months(), format_func=lambda p: p.strftime("%B %Y"), key="dash_month",
                           label_visibility="collapsed")
     inc, exp = b.month_totals(period)
@@ -195,8 +214,10 @@ def render():
         kpi_html("Income", money(inc), change_pill(inc, p_inc, versus=versus)),
         kpi_html("Expenses", money(exp), change_pill(exp, p_exp, good_when_up=False, versus=versus)),
     ], cls="two")
-    _more_stats(b, period)
+    return period
 
+
+def _activity(b):
     with card("activity"):
         section("Recent activity")
         items = activity_items(b, limit=5)
@@ -206,8 +227,9 @@ def render():
         else:
             empty("Nothing recorded yet. Tap Add an entry to record your first one.")
 
-    month = period.strftime("%B")
-    with st.expander(f"Budgets and spending · {month}", icon=":material/donut_small:"):
+
+def _budgets(b, period):
+    with st.expander(f"Budgets and spending · {period.strftime('%B')}", icon=":material/donut_small:"):
         status = b.budget_status(period)
         if status:
             st.html(f'<div class="prog-list">{"".join(budget_html(s) for s in status)}</div>')
