@@ -650,6 +650,9 @@ def test_a_paired_meal_is_one_meal(conn):
     from meals.data import Kitchen
     from meals.data import _load as kitchen_frames
     ids = dict(q(conn, "SELECT name, id FROM meals.recipes WHERE name IN ('Kokonte', 'Palm nut soup')"))
+    # anything other tests planned for this breakfast steps aside (to a day long gone) while this runs
+    aside = [r[0] for r in q(conn, "UPDATE meals.plan SET day = DATE '2000-01-01' "
+                                   "WHERE day = CURRENT_DATE AND slot = 'Breakfast' RETURNING id")]
     made = q(conn, "INSERT INTO meals.plan (day, slot, recipe_id, qty) VALUES (CURRENT_DATE, 'Breakfast', %s, 14), "
                    "(CURRENT_DATE, 'Breakfast', %s, 2) RETURNING id", (ids["Palm nut soup"], ids["Kokonte"]))
     try:
@@ -671,6 +674,8 @@ def test_a_paired_meal_is_one_meal(conn):
         assert f"🍳 {meals} planned meal" in report, "kokonte + palm nut soup counts as one meal"
     finally:
         q(conn, "DELETE FROM meals.plan WHERE id IN %s", (tuple(r[0] for r in made),))
+        if aside:
+            q(conn, "UPDATE meals.plan SET day = CURRENT_DATE WHERE id IN %s", (tuple(aside),))
 
 
 # ---- audit fixes: each test is a bug that existed --------------------------------------------------------

@@ -449,3 +449,33 @@ def test_the_banner_turns_red_when_budgets_are_overspent(phone, app_url, conn):
         for cat, limit in limits:
             q(conn, "UPDATE budgets SET monthly_limit = %s WHERE category = %s", (limit, cat))
 
+
+def test_the_home_screen_icon_is_cashews(phone, app_url):
+    """Phones take the icon from the page's manifest; it must be Cashew's, not Streamlit's red crown."""
+    open_app(phone, app_url)
+    phone.wait_for_selector('link[rel="manifest"][data-cashew]', state="attached", timeout=15000)
+    href = phone.get_attribute('link[rel="manifest"]', "href")
+    assert href.endswith("/app/static/manifest.json"), href
+    manifest = phone.request.get(href).json()
+    assert manifest["name"] == "Cashew" and manifest["start_url"] == "/"
+    for icon in manifest["icons"]:
+        res = phone.request.get(href.rsplit("/", 1)[0] + "/" + icon["src"])
+        assert res.ok and res.body()[:4] == b"\x89PNG", icon
+    assert phone.locator('link[rel="manifest"]').count() == 1, "only one manifest"
+    assert phone.get_attribute('link[rel="apple-touch-icon"]', "href").endswith("apple-touch-icon.png")
+
+
+def test_the_icon_also_replaces_the_hosts_crown(browser, app_url):
+    """On Streamlit Cloud the app runs in a frame inside Streamlit's own page, whose manifest has the crown."""
+    ctx = browser.new_context(**PHONE)
+    page = ctx.new_page()
+    shell = app_url.rstrip("/") + "/cloud-shell.html"
+    page.route(shell, lambda route: route.fulfill(content_type="text/html", body=(
+        '<html><head><link rel="manifest" href="/streamlit-crown.json"></head><body style="margin:0">'
+        f'<iframe src="{app_url}" style="width:100%;height:100vh;border:0"></iframe></body></html>')))
+    page.goto(shell)
+    page.wait_for_selector('link[rel="manifest"][data-cashew]', state="attached", timeout=30000)
+    links = page.eval_on_selector_all('link[rel="manifest"]', "els => els.map(e => e.href)")
+    assert len(links) == 1 and links[0].endswith("/app/static/manifest.json"), links
+    ctx.close()
+

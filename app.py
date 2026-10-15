@@ -12,7 +12,7 @@ from core.db import init_db, invalidate, transact
 from ui import nav
 from ui.components import flash, show_flash
 from ui.login import current_user, login_screen, sign_out, write_cookie
-from ui.theme import apply_theme
+from ui.theme import apply_theme, home_icon, theme_missing
 from meals.pages import shopping as meal_shopping
 from views import dashboard, sections
 
@@ -20,6 +20,7 @@ HERE = Path(__file__).parent
 st.set_page_config(page_title="Cashew", page_icon=str(HERE / "assets" / "icon.svg"), layout="wide",
                    initial_sidebar_state="auto")
 apply_theme()
+home_icon()
 
 try:
     init_db()
@@ -111,6 +112,11 @@ with st.sidebar:
         st.rerun()
 
 show_flash()
+if theme_missing() and user["is_owner"]:
+    st.warning("Cashew's colours and settings file didn't reach the server, so you're seeing Streamlit's red. "
+               "Make sure the **.streamlit** folder (with config.toml inside) is in your GitHub repository, in the "
+               "same folder as app.py, then reboot the app. On a Mac, Finder hides folders starting with a dot: "
+               "press Cmd+Shift+. to see it before uploading.", icon=":material/palette:")
 
 # On a phone the menu covers the page; close it after a page is picked from it.
 if st.session_state.get("_last_page") not in (None, page.url_path):

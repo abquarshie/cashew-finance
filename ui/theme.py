@@ -254,3 +254,41 @@ def apply_theme():
     else:
         root = f":root{{{_vars(LIGHT)}}} @media (prefers-color-scheme: dark){{:root{{{_vars(DARK)}}}}}"
     st.html(CSS.replace("/*ROOT*/", root))
+
+
+# Phones take a home-screen icon from the page around the app. Without this, every Streamlit app gets
+# Streamlit's red crown. The script points that page at Cashew's own icon and manifest in static/
+# (served at app/static/ because .streamlit/config.toml switches on enableStaticServing).
+HOME_ICON = """<script>/* home-screen icon */
+(() => {
+  const dir = location.pathname.replace(/[^/]*$/, "");
+  const base = location.origin + dir + "app/static/";
+  let doc = document;
+  try { if (window.top.document) doc = window.top.document; } catch (e) { /* another site: use our own page */ }
+  if (doc.querySelector('link[data-cashew]')) return;
+  const head = doc.head;
+  const put = (tag, attrs, drop) => {
+    if (drop) head.querySelectorAll(drop).forEach(el => el.remove());
+    const el = doc.createElement(tag);
+    Object.entries(attrs).forEach(([k, v]) => el.setAttribute(k, v));
+    el.setAttribute("data-cashew", "");
+    head.appendChild(el);
+  };
+  put("link", {rel: "manifest", href: base + "manifest.json"}, 'link[rel="manifest"]');
+  put("link", {rel: "apple-touch-icon", href: base + "apple-touch-icon.png"}, 'link[rel="apple-touch-icon"]');
+  put("link", {rel: "icon", type: "image/png", sizes: "192x192", href: base + "icon-192.png"}, 'link[rel~="icon"]');
+  put("meta", {name: "theme-color", content: "#14A38F"}, 'meta[name="theme-color"]');
+  put("meta", {name: "apple-mobile-web-app-title", content: "Cashew"}, 'meta[name="apple-mobile-web-app-title"]');
+  put("meta", {name: "application-name", content: "Cashew"}, 'meta[name="application-name"]');
+})();
+</script>"""
+
+
+def home_icon():
+    if st.get_option("server.enableStaticServing"):
+        st.html(HOME_ICON, unsafe_allow_javascript=True, width="content")
+
+
+def theme_missing():
+    """True when .streamlit/config.toml didn't reach the server (colours fall back to Streamlit's red)."""
+    return st.get_option("theme.light.primaryColor") is None
