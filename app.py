@@ -12,7 +12,7 @@ from core.db import init_db, invalidate, transact
 from ui import nav
 from ui.components import flash, show_flash
 from ui.login import current_user, login_screen, sign_out, write_cookie
-from ui.theme import apply_theme, home_icon, theme_missing
+from ui.theme import apply_theme, hide_host_chrome, home_icon, theme_missing
 from meals.pages import shopping as meal_shopping
 from views import dashboard, sections
 
@@ -21,6 +21,7 @@ st.set_page_config(page_title="Cashew", page_icon=str(HERE / "assets" / "icon.sv
                    initial_sidebar_state="auto")
 apply_theme()
 home_icon()
+hide_host_chrome()
 
 try:
     init_db()

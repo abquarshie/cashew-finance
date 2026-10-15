@@ -91,17 +91,16 @@ def test_dashboard_layout(phone, app_url):
     tiles = phone.locator(".kpi-grid .kpi")
     assert [tiles.nth(i).locator(".kpi-label").inner_text() for i in range(tiles.count())] == ["Income", "Expenses"]
 
+    hero = phone.locator(".hero").inner_text()
+    assert hero.count("\n") == 1, f"the banner is a label and a figure, nothing more: {hero!r}"
     balances = phone.locator('[data-testid="stExpander"]').filter(has_text="Account balances")
-    fold = balances.locator("summary").inner_text()
-    assert "everyday" in fold and "savings" in fold, "both totals sit on the fold, apart"
-    assert not phone.locator(".bal-group").first.is_visible(), "balances are one tap below"
+    assert balances.locator("summary").inner_text().strip().endswith("Account balances"), "no totals on the fold"
+    assert not phone.locator(".bal-everyday").is_visible(), "balances are one tap below"
     balances.locator("summary").click()
     settle(phone)
-    groups = phone.locator(".bal-group")
-    assert groups.count() == 2
-    assert groups.nth(0).inner_text().startswith("Everyday money") and "MoMo" in groups.nth(0).inner_text()
-    assert groups.nth(1).inner_text().startswith("Savings") and "Susu" in groups.nth(1).inner_text()
-    assert "Susu" not in groups.nth(0).inner_text(), "savings never sit with everyday money"
+    day, save = phone.locator(".bal-everyday").inner_text(), phone.locator(".bal-savings").inner_text()
+    assert "MoMo" in day and "Susu" not in day, "everyday accounts first"
+    assert "Susu" in save and "savings" in save, "savings below, marked, never mixed in"
 
     assert phone.get_by_role("button", name="Add an entry").is_visible()
     assert not amount_box(phone).count(), "the form only appears when Add is tapped"
@@ -124,8 +123,9 @@ def test_dashboard_layout(phone, app_url):
     sidebar.get_by_text("More stats").click()
     settle(phone, 2000)
     side = sidebar.inner_text()
-    for tile in ("Safe to spend until payday", "In all accounts", "Net balance", "Savings rate", "Budgets at risk", "Next auto entry", "Income and expenses, 6 months"):
+    for tile in ("In all accounts", "Savings rate", "Budgets at risk", "Next auto entry", "Income and expenses, 6 months"):
         assert tile in side
+    assert "Safe to spend" not in side and "Net balance" not in side
     assert sidebar.locator('[data-testid="stVegaLiteChart"], .vega-embed').count() >= 1
 
 
@@ -469,24 +469,36 @@ def test_the_home_screen_icon_is_cashews(phone, app_url):
     assert phone.get_attribute('link[rel="apple-touch-icon"]', "href").endswith("apple-touch-icon.png")
 
 
-def test_the_icon_also_replaces_the_hosts_crown(browser, app_url):
+def test_the_icon_and_hidden_buttons_on_streamlit_cloud(browser, app_url):
     """On Streamlit Cloud the app runs in a frame inside Streamlit's own page, whose manifest has the crown."""
     ctx = browser.new_context(**PHONE)
     page = ctx.new_page()
     shell = app_url.rstrip("/") + "/cloud-shell.html"
     page.route(shell, lambda route: route.fulfill(content_type="text/html", body=(
         '<html><head><link rel="manifest" href="/streamlit-crown.json"></head><body style="margin:0">'
-        f'<iframe src="{app_url}" style="width:100%;height:100vh;border:0"></iframe></body></html>')))
+        f'<iframe src="{app_url}" style="width:100%;height:100vh;border:0"></iframe>'
+        '<div id="manage" style="position:fixed;bottom:0;right:0"><div><button>Manage app</button></div></div>'
+        '<a id="badge" class="_container_gzau3_1 _viewerBadge_nim44_23" href="https://streamlit.io/cloud">S</a>'
+        '<div id="me" class="_profileContainer_gzau3_53">me</div></body></html>')))
     page.goto(shell)
     page.wait_for_selector('link[rel="manifest"][data-cashew]', state="attached", timeout=30000)
     links = page.eval_on_selector_all('link[rel="manifest"]', "els => els.map(e => e.href)")
     assert len(links) == 1 and links[0].endswith("/app/static/manifest.json"), links
+    page.wait_for_timeout(500)
+    for el in ("#manage", "#badge", "#me"):
+        assert not page.locator(el).is_visible(), f"{el}: Streamlit Cloud's buttons are hidden"
+    assert page.locator("iframe").is_visible(), "the app itself stays"
+    frame = page.frame_locator("iframe")
+    shown = frame.locator("body").evaluate(
+        "b => { const d = document.createElement('div'); d.setAttribute('data-testid', 'stToolbarActions');"
+        " d.textContent = 'Fork'; b.appendChild(d); return getComputedStyle(d).display; }")
+    assert shown == "none", "Share / Fork / GitHub in the app's top bar are hidden"
     ctx.close()
 
 
 def test_the_banner_shows_an_everyday_debt_and_leaves_savings_alone(phone, app_url, conn):
-    """Everyday accounts overdrawn: the banner says so in dark red, the figure is the debt, and the savings
-    sit apart, untouched."""
+    """Everyday accounts overdrawn: the banner says so in dark red and the figure is the debt; savings, however
+    much is in them, don't cover it."""
     from core.data import Book, _load_frames
     b = Book(_load_frames(conn))
     made = []
@@ -503,8 +515,7 @@ def test_the_banner_shows_an_everyday_debt_and_leaves_savings_alone(phone, app_u
         hero = phone.locator(".hero")
         assert hero.get_attribute("data-state") == "debt" and "over" in hero.get_attribute("class")
         text = hero.inner_text()
-        assert "Everyday accounts in debt" in text and "−GH₵100.00" in text, text
-        assert "🔒 Savings" in text and "not counted" in text, "savings shown apart, never used to cover it"
+        assert text.split("\n") == ["Everyday accounts in debt", "−GH₵100.00"], text
         phone.screenshot(path="tests/screenshots/banner-everyday-debt.png")
     finally:
         if made:

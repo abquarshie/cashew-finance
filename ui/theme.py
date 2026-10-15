@@ -39,6 +39,8 @@ header[data-testid="stHeader"] { background: transparent; }
 [data-testid="stSidebarCollapseButton"] { opacity: 1 !important; visibility: visible !important; }
 section[data-testid="stSidebar"] { border-right: 1px solid var(--line); }
 [data-testid="stSidebarNavSeparator"] { display: none; }
+/* Streamlit Cloud's own buttons in the app's top bar (Share, star, edit, GitHub; Fork for visitors) */
+[data-testid="stToolbarActions"], [data-testid="stAppDeployButton"], .stAppDeployButton { display: none !important; }
 
 
 /* ---- type ---- */
@@ -82,11 +84,6 @@ div.st-key-card-savebar { position: sticky; bottom: 14px; z-index: 20; border-co
   margin: .25rem 0 .3rem; font-variant-numeric: tabular-nums; position: relative; z-index: 1; }
 .hero.over { background: var(--feature-over); }
 .hero.over .hero-label { color: var(--feature-over-muted); }
-.hero-note { color: var(--feature-text); opacity: .86; font-size: .84rem; font-weight: 600; line-height: 1.4;
-  position: relative; z-index: 1; max-width: 34rem; }
-.hero-savings { display: inline-block; margin-top: .6rem; padding: .25rem .6rem; border-radius: 999px;
-  background: rgba(255,255,255,.12); color: var(--feature-text); font-size: .76rem; font-weight: 700;
-  position: relative; z-index: 1; }
 .kpi-grid.two { grid-template-columns: 1fr 1fr; }
 .bal-rows { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); column-gap: 1.4rem; margin: 0 0 .3rem; }
 .bal-row { display: flex; justify-content: space-between; gap: .6rem; font-size: .9rem; padding: .4rem 0;
@@ -94,10 +91,9 @@ div.st-key-card-savebar { position: sticky; bottom: 14px; z-index: 20; border-co
 .bal-row span { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bal-row b { font-weight: 750; font-variant-numeric: tabular-nums; }
 .bal-row b.neg { color: var(--out); }
-.bal-group + .bal-group { margin-top: .9rem; }
-.bal-head { display: flex; justify-content: space-between; font-weight: 750; font-size: .92rem; }
-.bal-head b.neg { color: var(--out); }
-.bal-note { color: var(--muted); font-size: .76rem; margin-bottom: .1rem; }
+.bal-row span i { font-style: normal; font-size: .68rem; font-weight: 700; padding: 0 6px; border-radius: 999px;
+  background: var(--neutral-soft); margin-left: 4px; }
+.bal-savings { margin-top: .7rem; padding-top: .3rem; border-top: 2px solid var(--line); }
 /* ---- Today card: what to cook and whether it's all in ---- */
 .today-head { font-size: 1rem; font-weight: 750; letter-spacing: -.01em; margin-bottom: .35rem; }
 .today-row { padding: .45rem 0; border-top: 1px solid var(--line); font-size: .9rem; line-height: 1.35; }
@@ -288,6 +284,42 @@ HOME_ICON = """<script>/* home-screen icon */
   put("meta", {name: "application-name", content: "Cashew"}, 'meta[name="application-name"]');
 })();
 </script>"""
+
+
+# Streamlit Cloud puts a "Manage app" button, its crown badge and the author's picture on the page around the
+# app, outside it. Hide them there (same site, so the app may reach it), including when they appear late.
+HOST_CHROME = """<script>/* hide host buttons */
+(() => {
+  let doc;
+  try { doc = window.top.document; } catch (e) { return; }
+  if (!doc || doc === document || doc.getElementById("cashew-host-chrome")) return;
+  const style = doc.createElement("style");
+  style.id = "cashew-host-chrome";
+  style.textContent = `
+    [class*="viewerBadge"], [class*="profileContainer"], [class*="ProfileContainer"],
+    [data-testid="manage-app-button"], [data-testid*="appCreator"], [data-testid*="viewerBadge"],
+    a[href*="streamlit.io/cloud"], a[href*="share.streamlit.io/user"] { display: none !important; }`;
+  doc.head.appendChild(style);
+  const sweep = () => {
+    doc.querySelectorAll("button, a, div[role=button]").forEach(el => {
+      if ((el.textContent || "").trim() !== "Manage app") return;
+      // hide the floating panel that holds it (a few levels up at most), never anything holding the app itself
+      let box = el, up = 0;
+      while (up < 4 && box.parentElement && box.parentElement !== doc.body &&
+             getComputedStyle(box).position !== "fixed" && !box.parentElement.querySelector("iframe")) {
+        box = box.parentElement; up += 1;
+      }
+      if (!box.querySelector("iframe")) box.style.setProperty("display", "none", "important");
+    });
+  };
+  sweep();
+  new MutationObserver(sweep).observe(doc.body, {childList: true, subtree: true});
+})();
+</script>"""
+
+
+def hide_host_chrome():
+    st.html(HOST_CHROME, unsafe_allow_javascript=True, width="content")
 
 
 def home_icon():

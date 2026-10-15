@@ -86,26 +86,15 @@ def _mini(label, value, sub="", wide=False):
 def _more_stats(b, period):
     """Secondary tiles, tucked into the sidebar behind a toggle."""
     slot = drawer()
-    on = slot.toggle("More stats", key="draft_more_stats", help="Safe to spend until payday, total in all accounts, net balance, "
-                     "savings rate, budgets at risk, the next auto entry, spending by person, and income and expenses "
-                     "over 6 months.")
+    on = slot.toggle("More stats", key="draft_more_stats", help="Total in all accounts, savings rate, budgets at risk, the next "
+                     "auto entry, spending by person, and income and expenses over 6 months.")
     if not on:
         return
-    s2s = b.safe_to_spend()
-    if s2s["money"] < 0:
-        safe_sub = f"Everyday accounts are {money(-s2s['money'])} in debt. Savings aren't counted."
-    elif s2s["safe"] > 0:
-        safe_sub = f"About {money(max(s2s['per_day'], 0))} a day for {s2s['days']} day{'s' if s2s['days'] != 1 else ''}"
-    else:
-        safe_sub = "Spending is ahead of what's coming in"
-    safe_tile = _mini(f"Safe to spend until payday, {s2s['payday']:%a %d %b}", money(s2s["safe"]), esc(safe_sub), wide=True)
     inc, exp = b.month_totals(period)
-    p_inc, p_exp = b.month_totals(period - 1)
     balances = b.balances()
     total = float(balances.sum()) if len(balances) else 0.0
     total_tile = _mini("In all accounts", money(total),
                        f"{len(balances)} account{'s' if len(balances) != 1 else ''}, savings included", wide=True)
-    net_tile = _mini("Net balance", money(inc - exp), change_pill(inc - exp, p_inc - p_exp), wide=True)
     if inc > 0:
         rate = (inc - exp) / inc * 100
         rate_tile = _mini("Savings rate", f"{rate:.0f}%", "of income kept" if rate >= 0 else "Spending is above income")
@@ -126,7 +115,7 @@ def _more_stats(b, period):
         when = "Today" if days <= 0 else ("Tomorrow" if days == 1 else f"{nxt['next_date']:%a %d %b}")
         next_tile = _mini("Next auto entry", when, esc(f"{nxt['name']}, {money(nxt['amount'])}"), wide=True)
 
-    tiles = [safe_tile, total_tile, net_tile, rate_tile, risk_tile, next_tile]
+    tiles = [total_tile, rate_tile, risk_tile, next_tile]
 
     if b.multi_member:
         by_member = b.month_expenses(period).groupby("member")["amount"].sum().sort_values(ascending=False)
@@ -146,49 +135,34 @@ def _more_stats(b, period):
 
 def _budget_tile(b):
     """The one big number: what can really be spent this month. It's the budgets that are left, but never more
-    than the everyday accounts hold; savings are shown apart and never counted. Dark red for a debt or an
-    overspend."""
+    than the everyday accounts hold; savings are never counted. Dark red for a debt or an overspend."""
     p = b.spending_power()
     month = date.today().strftime("%B")
-    state, left = p["state"], p["left"]
-    label = {"debt": "Everyday accounts in debt", "empty": f"Total budget left · {month}",
-             "no_budget": f"Everyday money · {month}"}.get(state, f"Total budget left · {month}")
-    note = {
-        "debt": f"Everyday accounts are {money(p['debt'])} below zero. Nothing more can be spent until money comes in.",
-        "empty": "Everyday money is used up. Nothing more can be spent until money comes in.",
-        "over_budget": "This month's budgets are overspent.",
-        "capped": (f"Budgets allow {money(p['budget']['left'])}, but everyday accounts only hold "
-                   f"{money(p['everyday'])}."),
-        "no_budget": "No monthly budgets set, so this is all the everyday money.",
-    }.get(state, "")
+    state = p["state"]
+    label = {"debt": "Everyday accounts in debt", "no_budget": f"Everyday money · {month}"}.get(
+        state, f"Total budget left · {month}")
     red = " over" if state in ("debt", "empty", "over_budget") else ""
-    savings = (f'<div class="hero-savings">🔒 Savings {money(p["savings"])} · kept separate, not counted</div>'
-               if p["has_savings"] else "")
     return (f'<div class="hero{red}" data-state="{state}"><div class="hero-label">{label}</div>'
-            f'<div class="hero-value">{money(left)}</div>'
-            + (f'<div class="hero-note">{esc(note)}</div>' if note else "") + f"{savings}</div>")
+            f'<div class="hero-value">{money(p["left"])}</div></div>')
 
 
 def _balances(b):
-    """Every account, one tap below the big number: everyday money and savings apart, each with its total."""
+    """Every account, one tap below the big number: everyday accounts first, then savings, kept apart."""
     balances = b.balances()
     everyday = set(b.everyday_accounts)
-    day = {n: v for n, v in balances.items() if n in everyday}
-    save = {n: v for n, v in balances.items() if n not in everyday}
-    day_total, save_total = sum(day.values()), sum(save.values())
-    title = f"Account balances · {money(day_total)} everyday" + (f", {money(save_total)} savings" if save else "")
-    with st.expander(title, icon=":material/account_balance_wallet:"):
-        def group(name, accounts, total, note):
-            rows = "".join(f'<div class="bal-row"><span>{esc(n)}</span><b class="{"neg" if v < 0 else ""}">'
-                           f'{money(v)}</b></div>' for n, v in accounts.items())
-            return (f'<div class="bal-group"><div class="bal-head"><span>{name}</span>'
-                    f'<b class="{"neg" if total < 0 else ""}">{money(total)}</b></div>'
-                    f'<div class="bal-note">{note}</div><div class="bal-rows">{rows}</div></div>')
-        html = group("Everyday money", day, day_total, "What the budget can use.")
+
+    def rows(accounts, tag=""):
+        return "".join(f'<div class="bal-row"><span>{esc(n)}{tag}</span><b class="{"neg" if v < 0 else ""}">'
+                       f'{money(v)}</b></div>' for n, v in accounts)
+    with st.expander("Account balances", icon=":material/account_balance_wallet:"):
+        day = [(n, v) for n, v in balances.items() if n in everyday]
+        save = [(n, v) for n, v in balances.items() if n not in everyday]
+        html = f'<div class="bal-rows bal-everyday">{rows(day)}</div>'
         if save:
-            html += group("Savings", save, save_total, "Kept separate: never counted as money to spend.")
+            html += f'<div class="bal-rows bal-savings">{rows(save, " <i>savings</i>")}</div>'
         st.html(html)
-        st.caption("Which accounts count as everyday money is set in Settings → Accounts.")
+        st.caption("Savings are never counted as money to spend. Which accounts are everyday money is set in "
+                   "Settings → Accounts.")
         unassigned = b.unassigned
         if unassigned:
             field_msg(f"{unassigned} older entr{'ies have' if unassigned != 1 else 'y has'} no account, so balances "
