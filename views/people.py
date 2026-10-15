@@ -159,13 +159,13 @@ def _reminders():
     from core.data import book as money_book
     from meals.briefing import evening, morning
     from meals.data import kitchen
-    from notify import SendError, food_budget_left, send
+    from notify import SendError, send
 
     with card("reminders"):
         section("What gets sent")
-        st.write("Every morning at 6:00: today's meals, prep and shopping to do, leftovers to eat, low stock and "
-                 "safe to spend. In the evening, only when something needs doing tonight. On the 1st of each month, "
-                 "a short report on the month before.")
+        st.write("Every morning at 6:00: today's meals and what each is missing, what to buy (food, then household "
+                 "supplies), and the total budget left for the month. In the evening, only when something needs "
+                 "doing tonight. On the 1st of each month, a short report on the month before.")
         k, b = kitchen(), money_book()
         now = datetime.now()
         tab_m, tab_e, tab_r, tab_s = st.tabs(["Morning preview", "Evening preview", "Monthly report", "Set up"])
@@ -174,7 +174,7 @@ def _reminders():
             st.caption("Sent on the 1st of each month, about the month before.")
             st.html(f'<div class="tg-preview">{_as_html(monthly(b, k if b.feature("kitchen") else None, now.date()))}</div>')
         with tab_m:
-            st.html(f'<div class="tg-preview">{_as_html(morning(k, b, now, food_budget_left(b, k, now.date())))}</div>')
+            st.html(f'<div class="tg-preview">{_as_html(morning(k, b, now))}</div>')
         with tab_e:
             msg = evening(k, now)
             if msg:
@@ -214,7 +214,7 @@ def _reminders():
             if st.button("Send the morning message now", disabled=not (token and chats), key="tg_test",
                          icon=":material/send:"):
                 try:
-                    n = send(morning(k, b, now, food_budget_left(b, k, now.date())), token.strip(), chats)
+                    n = send(morning(k, b, now), token.strip(), chats)
                     flash(f"Sent to {n} chat{'s' if n != 1 else ''}. Check Telegram.", ":material/send:")
                     st.rerun()
                 except SendError as exc:

@@ -358,7 +358,7 @@ def test_waste_is_logged(desktop, app_url, conn):
 def test_reminder_settings_preview(desktop, app_url):
     sign_in(desktop, app_url, path="settings?tab_settings=Reminders")
     body = desktop.inner_text("body")
-    assert "What gets sent" in body and "Good morning!" in body
+    assert "What gets sent" in body and "Today's Meals" in body and "Total Budget Left for the Month" in body
     desktop.get_by_role("tab", name="Monthly report").click()
     settle(desktop)
     assert "in Cashew" in desktop.inner_text("body")

@@ -222,6 +222,12 @@ class Kitchen:
                          self.fridge, self.names, self.household, packs=self.packs, alloc=self.allocation(today),
                          fun=self.fun, low_levels=food_low, usual=self.unit_of)
 
+    def food_low(self):
+        """Food staples at or below their warning level, by name (household supplies have supplies_low)."""
+        return sorted(self.names.get(ing, "?") for (ing, base), level in self.low_levels.items()
+                      if ing not in self.supplies and level is not None
+                      and float(self.pantry.get((ing, base), 0.0)) <= float(level))
+
     def supplies_low(self):
         """Household supplies at or below their warning level (or out), by name."""
         out = []

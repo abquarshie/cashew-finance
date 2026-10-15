@@ -458,9 +458,12 @@ def test_phone_messages(conn):
     from meals.data import Kitchen
     from meals.data import _load as kitchen_frames
     k, b = Kitchen(kitchen_frames(conn)), Book(money_frames(conn))
-    text = morning(k, b, datetime.now(), 480.0)
-    assert text.startswith("☀️ <b>Good morning!") and "Safe to spend until payday" in text
-    assert "Food budget left: GH₵480.00" in text
+    text = morning(k, b, datetime.now())
+    today = date.today()
+    assert text.startswith(f"☀️ <b>{today:%A}, {today.day} {today:%b}</b>")
+    assert "🍽️ <b>Today's Meals</b>" in text and "💰 <b>Financial Standing</b>" in text
+    left = b.budget_total(pd.Period(today, "M"))["left"]
+    assert f"• Total Budget Left for the Month: GH₵{left:,.2f}" in text
     assert "<script" not in text
     msg = evening(k, datetime.now())
     assert msg is None or msg.startswith("🌙 <b>For tomorrow")
@@ -794,3 +797,36 @@ def test_missing_ingredients_show_amounts():
     # the same item short for two dishes in one meal is added up
     assert missing_text(k, [(2, "pcs", 1), (2, "pcs", 2)]) == "3 Onion"
     assert missing_text(k, [(i, "pcs", 1) for i in (2, 3, 4, 5)]).endswith(" +1")
+
+
+def test_the_morning_message_reads_like_the_sample(conn):
+    """☀️ day, 🍽️ each meal with what's missing, 🛒 what to buy (food, then household), 💰 budget left."""
+    from datetime import datetime
+
+    from meals.briefing import morning
+    from meals.data import Kitchen
+    from meals.data import _load as kitchen_frames
+    ids = dict(q(conn, "SELECT name, id FROM meals.recipes WHERE name IN ('Kokonte', 'Palm nut soup')"))
+    eggs, old_level = q(conn, "SELECT id, low_level FROM meals.ingredients WHERE name = 'Eggs'")[0]
+    aside = [r[0] for r in q(conn, "UPDATE meals.plan SET day = DATE '2000-01-01' "
+                                   "WHERE day = CURRENT_DATE RETURNING id")]
+    made = [r[0] for r in q(conn, "INSERT INTO meals.plan (day, slot, recipe_id, qty) VALUES "
+                                  "(CURRENT_DATE, 'Lunch', %s, 14), (CURRENT_DATE, 'Lunch', %s, 2) RETURNING id",
+                            (ids["Palm nut soup"], ids["Kokonte"]))]
+    q(conn, "UPDATE meals.ingredients SET low_level = 1000 WHERE id = %s", (eggs,))  # far more than in stock
+    try:
+        text = morning(Kitchen(kitchen_frames(conn)), Book(_load_frames(conn)), datetime.now())
+        lines = text.split("\n")
+        lunch = next(x for x in lines if x.startswith("• Lunch:"))
+        assert lunch.startswith("• Lunch: Kokonte + Palm nut soup 🛒 (Missing: "), lunch
+        assert "🛒 <b>Things to Buy</b>" in lines
+        food = next(x for x in lines if x.startswith("• Pantry / Food: "))
+        assert food.split(", ")[0].endswith(")"), "today's shortfall comes first, with its amount"
+        assert "Eggs" in food.split(", "), "then staples running low"
+        assert lines.index("🛒 <b>Things to Buy</b>") < lines.index("💰 <b>Financial Standing</b>")
+    finally:
+        q(conn, "DELETE FROM meals.plan WHERE id IN %s", (tuple(made),))
+        q(conn, "UPDATE meals.ingredients SET low_level = %s WHERE id = %s", (old_level, eggs))
+        if aside:
+            q(conn, "UPDATE meals.plan SET day = CURRENT_DATE WHERE id IN %s", (tuple(aside),))
+

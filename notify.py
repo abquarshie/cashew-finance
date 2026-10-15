@@ -24,13 +24,6 @@ from meals.data import Kitchen
 from meals.data import _load as load_kitchen
 
 
-def food_budget_left(book, kitchen, today):
-    """What's left this month in the budgets covering the kitchen's categories, or None."""
-    from meals.logic import food_budget
-    fb = food_budget(book, {c for c in kitchen.food_categories if c}, today)
-    return max(fb["limit"] - fb["spent"], 0) if fb else None
-
-
 def build(mode, conn, now=None):
     now = now or datetime.now()
     ensure_schema(conn)
@@ -41,7 +34,7 @@ def build(mode, conn, now=None):
     if mode == "monthly":
         from core.report import monthly
         return monthly(book, k if book.feature("kitchen") else None, now.date())
-    return morning(k, book, now, food_budget_left(book, k, now.date()))
+    return morning(k, book, now)
 
 
 TELEGRAM_HINTS = {

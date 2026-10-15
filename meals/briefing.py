@@ -6,6 +6,8 @@ shows exactly the same thing on Home, on the meal plan and in the preview.
 from datetime import date, timedelta
 from html import escape
 
+import pandas as pd
+
 from meals.logic import (GUARD_JOKE, OPEN, SLOTS, bought_cost, budget_guard, food_budget, meal_status,
                           shopping_list, shortfall)
 from meals.quips import with_joke
@@ -146,34 +148,58 @@ def _menu(k, day):
     return lines
 
 
-def morning(k, book, now, budget_left=None):
-    """Today's menu with what's in stock, what needs doing, and money. Returns HTML text for Telegram."""
-    today = now.date()
-    out = [f"☀️ <b>Good morning! {today:%A %d %b}</b>", ""]
-    menu = _menu(k, today)
-    out += (["<b>Today's meals</b>"] + menu) if menu else [
-        escape(with_joke("nothing_planned", "No meals planned for today.", today, "", k.fun))]
+def _today_shopping(k, today):
+    """What today's meals are short of, added up: [(name, amount)], e.g. [("Kokonte powder", "2 cups")]."""
+    total = {}
+    for e in k.entries(today):
+        if e["status"] != OPEN:
+            continue
+        for ing, base, q in (k.meal_status(e["id"], today) or {}).get("missing", []):
+            total[(ing, base)] = total.get((ing, base), 0.0) + float(q)
+    return [(k.names.get(ing, "?"), fmt(q, base, k.unit_of.get(ing))) for (ing, base), q in total.items()]
 
-    notes = k.notes(now)
-    if notes:
-        out += ["", "<b>To do</b>"] + [f"{ICON[t]} {escape(x)}" for t, x in notes]
-    low = k.supplies_low()
-    if low:
-        text = "Household running low: " + ", ".join(low[:6]) + (f" and {len(low) - 6} more" if len(low) > 6 else "") + "."
-        out += ["", "🧽 " + escape(with_joke("supplies_low", text, today, "", k.fun))]
+
+def morning(k, book, now):
+    """The morning message: today's meals, what to buy, and what's left of the month's budgets.
+    Returns HTML text for Telegram, e.g.
+
+        ☀️ Wednesday, 14 Oct
+        🍽️ Today's Meals
+        • Breakfast: Lipton tea + Round sugar bread ✔️
+        • Lunch: Kokonte + Groundnut soup 🛒 (Missing: 2 cups Kokonte powder)
+        🛒 Things to Buy
+        • Pantry / Food: Kokonte powder (2 cups), Eggs, Lipton
+        • Household: Bar soap, Bin bags
+        💰 Financial Standing
+        • Total Budget Left for the Month: GH₵-2,072.55
+    """
+    today = now.date()
+    out = [f"☀️ <b>{today:%A}, {today.day} {today:%b}</b>", "", "🍽️ <b>Today's Meals</b>"]
+    meals = []
+    for slot in SLOTS:
+        parts = [e for e in k.entries(today) if e["slot"] == slot]
+        if parts:
+            status, label = meal_state(k, parts, today)
+            note = f" (Missing: {label[len('missing '):]})" if status == "short" else ""
+            meals.append(f"• {slot}: {escape(k.meal_name(parts))} {STATUS_ICON[status]}{escape(note)}")
+    out += meals or ["• Nothing planned yet."]
+
+    food = [f"{name} ({amount})" if amount else name for name, amount in _today_shopping(k, today)]
+    named = {f.split(" (")[0] for f in food}
+    food += [n for n in k.food_low() if n not in named]
+    household = k.supplies_low()
+    if food or household:
+        out += ["", "🛒 <b>Things to Buy</b>"]
+        if food:
+            out.append("• Pantry / Food: " + escape(", ".join(food)))
+        if household:
+            out.append("• Household: " + escape(", ".join(household)))
 
     if book is not None:
         try:
-            s = book.safe_to_spend(today)
-            money_line = (f"💰 Safe to spend until payday ({s['payday']:%a %d %b}): GH₵{s['safe']:,.2f}, "
-                          f"about GH₵{max(s['per_day'], 0):,.2f} a day.")
-            if budget_left is not None:
-                money_line += f" Food budget left: GH₵{budget_left:,.2f}."
-            out += ["", escape(money_line)]
-            for kind in ("food", "household"):
-                g = guard(k, book, today, kind)
-                if g:
-                    out.append(f"⚠️ {escape(g[1])}")
+            t = book.budget_total(pd.Period(today, "M"))
+            line = f"GH₵{t['left']:,.2f}" if t else "no monthly budgets set"
+            out += ["", "💰 <b>Financial Standing</b>", f"• Total Budget Left for the Month: {line}"]
         except Exception:
             pass
     return "\n".join(out)
