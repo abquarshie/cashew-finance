@@ -113,7 +113,7 @@ def _eat_leftovers(cur, e, household):
     batches = [{"id": i, "portions": float(p), "eat_by": by} for i, p, by in cur.fetchall()]
     taken, missing = take_portions(batches, wanted)
     for bid, t in taken:
-        cur.execute("UPDATE meals.fridge SET portions = portions - %s WHERE id = %s", (t, bid))
+        cur.execute("UPDATE meals.fridge SET portions = GREATEST(portions - %s, 0) WHERE id = %s", (t, bid))
     cur.execute("UPDATE meals.plan SET status = 'from_fridge', done_at = now(), done_by = %s, undo = %s "
                 "WHERE id = %s", (_me(), json.dumps({"fridge_taken": [list(x) for x in taken]}), e["id"]))
     return missing
@@ -463,6 +463,20 @@ def recipe_delete_statements(recipe_id, name):
     ]
 
 
+def ingredient_delete_statements(ingredient_id, name):
+    """Deleting an item: like a recipe, it comes off the plan where it hasn't been had yet, and stays in the
+    history (by name) where it has, however old. Its stock and prices go with it; a pairing that used it as a
+    side is removed if that leaves fewer than two parts."""
+    return [
+        ("DELETE FROM meals.plan WHERE ingredient_id = %s AND status = 'planned'", (ingredient_id,)),
+        ("UPDATE meals.plan SET label = COALESCE(label, %s), ingredient_id = NULL WHERE ingredient_id = %s",
+         (name[:80], ingredient_id)),
+        ("DELETE FROM meals.ingredients WHERE id = %s", (ingredient_id,)),
+        ("DELETE FROM meals.pairings p WHERE (SELECT count(*) FROM meals.pairing_items i WHERE i.pairing_id = p.id) < 2",
+         None),
+    ]
+
+
 # ---- pairings ---------------------------------------------------------------------------------------
 def save_pairing(pairing_id, name, recipe_ids, side=None):
     """Create or replace a pairing for the planner: its dishes, and optionally a side item eaten with it
@@ -549,7 +563,7 @@ def throw_away(batch_id, value_each=None, amount=None):
             cur.execute("INSERT INTO meals.waste (date, label, amount, unit, value, recipe_id, created_by) "
                         "VALUES (%s, %s, %s, %s, %s, %s, %s)",
                         (date.today(), label, gone, unit, round(value_each * gone, 2) if value_each else None, rid, _me()))
-            cur.execute("UPDATE meals.fridge SET portions = portions - %s WHERE id = %s", (gone, batch_id))
+            cur.execute("UPDATE meals.fridge SET portions = GREATEST(portions - %s, 0) WHERE id = %s", (gone, batch_id))
             return gone
     return _run(work)
 

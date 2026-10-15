@@ -1,6 +1,21 @@
 """Tables for the meal planner, kept in their own Postgres schema ("meals") so the money
 tables are never touched by it. Quantities are stored in base units (see meals/units.py)."""
 
+
+def never_negative(table, *columns):
+    """A database rule that these amounts can't go below zero. Added as NOT VALID: it holds for every new or
+    changed row, and doesn't refuse to start over an old row that's already negative."""
+    out = []
+    for col in columns:
+        name = f"{table.split('.')[-1]}_{col}_not_negative"
+        out.append(f"""DO $$ BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = '{name}') THEN
+                ALTER TABLE {table} ADD CONSTRAINT {name} CHECK ({col} >= 0) NOT VALID;
+            END IF;
+        END $$""")
+    return out
+
+
 TABLES = [
     "CREATE SCHEMA IF NOT EXISTS meals",
     """
@@ -215,6 +230,14 @@ TABLES += [
     "CREATE INDEX IF NOT EXISTS trip_items_trip_idx ON meals.trip_items (trip_id)",
     "CREATE INDEX IF NOT EXISTS plan_recipe_idx ON meals.plan (recipe_id)",
 ]
+# amounts, prices and stock are never negative (see never_negative)
+TABLES += (never_negative("meals.ingredients", "pack_size", "low_level")
+           + never_negative("meals.recipes", "portions", "price", "keeps_days", "prep_hours")
+           + never_negative("meals.recipe_items", "qty") + never_negative("meals.pairing_items", "qty")
+           + never_negative("meals.plan", "qty", "price") + never_negative("meals.pantry", "qty")
+           + never_negative("meals.prices", "per_unit") + never_negative("meals.fridge", "portions")
+           + never_negative("meals.trips", "total") + never_negative("meals.trip_items", "qty", "price")
+           + never_negative("meals.waste", "amount", "value") + never_negative("meals.bought", "qty", "paid"))
 
 # Backup and restore order (parents before children).
 BACKUP_TABLES = ["meals.ingredients", "meals.recipes", "meals.recipe_items", "meals.pairings", "meals.pairing_items",

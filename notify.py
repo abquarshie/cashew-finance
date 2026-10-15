@@ -3,6 +3,7 @@
     DATABASE_URL=... TELEGRAM_BOT_TOKEN=... TELEGRAM_CHAT_ID=... python notify.py morning
     DATABASE_URL=... TELEGRAM_BOT_TOKEN=... TELEGRAM_CHAT_ID=... python notify.py evening
     DATABASE_URL=... TELEGRAM_BOT_TOKEN=... TELEGRAM_CHAT_ID=... python notify.py monthly   (last month's report)
+    DATABASE_URL=... TELEGRAM_BOT_TOKEN=... TELEGRAM_CHAT_ID=... python notify.py stocktake (Sunday stock check)
 
 TELEGRAM_CHAT_ID can list several chats separated by commas (each person, or one family group).
 Add --dry-run to print the message instead of sending it.
@@ -19,7 +20,7 @@ import psycopg2
 from core.data import Book
 from core.data import _load_frames as load_money
 from core.schema import ensure_schema
-from meals.briefing import evening, morning
+from meals.briefing import evening, morning, stocktake
 from meals.data import Kitchen
 from meals.data import _load as load_kitchen
 
@@ -30,6 +31,8 @@ def build(mode, conn, now=None):
     k = Kitchen(load_kitchen(conn))
     if mode == "evening":
         return evening(k, now)
+    if mode == "stocktake":
+        return stocktake(k, now)
     book = Book(load_money(conn))
     if mode == "monthly":
         from core.report import monthly
@@ -87,8 +90,8 @@ def send(text, token, chat_ids, api=None):
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     mode = args[0] if args else "morning"
-    if mode not in ("morning", "evening", "monthly"):
-        sys.exit("Use: python notify.py morning|evening|monthly [--dry-run]")
+    if mode not in ("morning", "evening", "monthly", "stocktake"):
+        sys.exit("Use: python notify.py morning|evening|monthly|stocktake [--dry-run]")
     url = os.environ.get("DATABASE_URL")
     if not url:
         sys.exit("DATABASE_URL is not set.")
@@ -110,7 +113,8 @@ def main():
     finally:
         conn.close()
     if not text:
-        print("Nothing needs doing tonight, so no message.")
+        print("Nothing cooked this week, so no stock check." if mode == "stocktake"
+              else "Nothing needs doing tonight, so no message.")
         return
     if "--dry-run" in sys.argv:
         print(text)

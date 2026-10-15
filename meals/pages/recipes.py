@@ -331,8 +331,9 @@ def _ingredients(k):
                 pick = st.selectbox("Not used in any recipe or plan", unused, format_func=lambda i: k.names[i],
                                     key="meal_ing_del")
                 if st.button("Remove", key="meal_ing_del_go", icon=":material/delete:"):
-                    confirm(f"Remove **{k.names[pick]}**? Its pantry stock and prices go too.",
-                            [("DELETE FROM meals.ingredients WHERE id = %s", (pick,))], f"Removed {k.names[pick]}",
+                    confirm(f"Remove **{k.names[pick]}**? Its pantry stock and prices go too. Meals it was part "
+                            "of stay in the history.",
+                            actions.ingredient_delete_statements(pick, k.names[pick]), f"Removed {k.names[pick]}",
                             button="Remove")
 
 

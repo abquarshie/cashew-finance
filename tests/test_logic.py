@@ -1,4 +1,5 @@
 """Fast checks of the logic behind the app: no browser needed."""
+import json
 from datetime import date, timedelta
 
 import psycopg2
@@ -814,6 +815,8 @@ def test_the_morning_message_reads_like_the_sample(conn):
                                   "(CURRENT_DATE, 'Lunch', %s, 14), (CURRENT_DATE, 'Lunch', %s, 2) RETURNING id",
                             (ids["Palm nut soup"], ids["Kokonte"]))]
     q(conn, "UPDATE meals.ingredients SET low_level = 1000 WHERE id = %s", (eggs,))  # far more than in stock
+    batch = q(conn, "INSERT INTO meals.fridge (label, portions, cooked_on, eat_by) VALUES ('Shito pepper', 2, "
+                    "CURRENT_DATE - 3, CURRENT_DATE) RETURNING id")[0][0]
     try:
         text = morning(Kitchen(kitchen_frames(conn)), Book(_load_frames(conn)), datetime.now())
         lines = text.split("\n")
@@ -824,9 +827,110 @@ def test_the_morning_message_reads_like_the_sample(conn):
         assert food.split(", ")[0].endswith(")"), "today's shortfall comes first, with its amount"
         assert "Eggs" in food.split(", "), "then staples running low"
         assert lines.index("🛒 <b>Things to Buy</b>") < lines.index("💰 <b>Financial Standing</b>")
+        heads = lines.index("⚠️ <b>Heads-up</b>")
+        assert lines.index("🍽️ <b>Today's Meals</b>") < heads < lines.index("🛒 <b>Things to Buy</b>")
+        assert "• Eat the 2 portions of Shito pepper by today." in lines, "food to eat today gets a line"
+        assert not any("Buy before cooking" in x or "Running low" in x for x in lines), "shopping stays under 🛒"
     finally:
         q(conn, "DELETE FROM meals.plan WHERE id IN %s", (tuple(made),))
         q(conn, "UPDATE meals.ingredients SET low_level = %s WHERE id = %s", (old_level, eggs))
+        q(conn, "DELETE FROM meals.fridge WHERE id = %s", (batch,))
         if aside:
             q(conn, "UPDATE meals.plan SET day = CURRENT_DATE WHERE id IN %s", (tuple(aside),))
 
+
+
+def test_the_daily_backup_leaves_a_note_for_the_owner(conn, tmp_path):
+    """backup.py run by GitHub notes when it ran; the app warns the owner once it's 3 days stale."""
+    import os
+    import subprocess
+    import sys
+    from datetime import datetime, timezone
+    url = os.environ["TEST_DATABASE_URL"]
+    env = {**os.environ, "DATABASE_URL": url, "GITHUB_ACTIONS": "true", "BACKUP_PASSPHRASE": "test passphrase"}
+    try:
+        subprocess.run([sys.executable, "backup.py", str(tmp_path)], env=env, check=True, capture_output=True)
+        assert list(tmp_path.glob("cashew-backup-*.zip.enc")), "an encrypted copy was saved"
+        b = Book(_load_frames(conn))
+        assert b.last_backup["rows"] > 0 and b.backup_age_days() == 0
+        q(conn, "UPDATE app_meta SET value = %s WHERE key = 'last_backup'",
+          (json.dumps({"at": (datetime.now(timezone.utc) - timedelta(days=4)).isoformat(), "kb": 1, "rows": 1}),))
+        assert Book(_load_frames(conn)).backup_age_days() == 4
+    finally:
+        q(conn, "DELETE FROM app_meta WHERE key = 'last_backup'")
+    assert Book(_load_frames(conn)).last_backup is None, "never run: no note, so a setup hint instead"
+
+
+def test_the_sunday_stock_check_lists_what_was_used(conn):
+    from datetime import datetime
+
+    from meals.briefing import stocktake
+    from meals.data import Kitchen
+    from meals.data import _load as kitchen_frames
+    rid = q(conn, "SELECT id FROM meals.recipes WHERE name = 'Palm nut soup'")[0][0]
+    made = q(conn, "INSERT INTO meals.plan (day, slot, recipe_id, qty, status) VALUES "
+                   "(CURRENT_DATE - 2, 'Supper', %s, 14, 'cooked') RETURNING id", (rid,))[0][0]
+    try:
+        k = Kitchen(kitchen_frames(conn))
+        items = k.stocktake(date.today())
+        assert 0 < len(items) <= 10, "a short list: the ten used most"
+        everything = [name for name, _ in k.stocktake(date.today(), most=1000)]
+        assert "Palm nut cream" in everything, "the soup's ingredients count"
+        assert not set(name for name, _ in items) & {k.names[i] for i in k.supplies}, "food only, no soap"
+        text = stocktake(k, datetime.now())
+        assert text.startswith("🧮 <b>Sunday stock check</b>") and "Pantry / Inventory" in text
+        assert stocktake(k, datetime.now() + timedelta(days=400)) is None, "nothing cooked: no message"
+    finally:
+        q(conn, "DELETE FROM meals.plan WHERE id = %s", (made,))
+
+
+def test_no_category_shares_a_group_name(conn):
+    from core.schema import untangle_names
+    clashes = q(conn, "SELECT c.name FROM categories c JOIN categories g ON lower(g.group_name) = lower(c.name) "
+                      "AND g.group_name <> c.group_name")
+    assert clashes == [], "the seeded Transportation 'Other' is now 'Other transport'"
+    # an older database: a category named like another group, with entries filed under it
+    q(conn, "INSERT INTO categories (name, group_name, kind) VALUES ('Health', 'Family', 'Expense')")
+    tx = q(conn, "INSERT INTO transactions (date, type, category, amount, member, account) VALUES "
+                 "(CURRENT_DATE, 'Expense', 'Health', 5, 'Household', 'Cash') RETURNING id")[0][0]
+    try:
+        with conn.cursor() as cur:
+            untangle_names(cur)
+            untangle_names(cur)  # running it again changes nothing
+        assert q(conn, "SELECT category FROM transactions WHERE id = %s", (tx,)) == [("Health (Family)",)]
+        assert q(conn, "SELECT group_name FROM categories WHERE name = 'Health (Family)'") == [("Family",)]
+        assert q(conn, "SELECT count(*) FROM categories WHERE name = 'Health'")[0][0] == 0
+    finally:
+        q(conn, "DELETE FROM transactions WHERE id = %s", (tx,))
+        q(conn, "DELETE FROM categories WHERE name IN ('Health', 'Health (Family)')")
+
+
+@pytest.mark.parametrize("sql", [
+    "INSERT INTO transactions (date, type, category, amount, member, account) "
+    "VALUES (CURRENT_DATE, 'Expense', 'Gas', -50, 'Household', 'Cash')",
+    "UPDATE budgets SET monthly_limit = -1 WHERE category = 'Food'",
+    "INSERT INTO meals.pantry (ingredient_id, unit, qty) SELECT min(id), 'pcs', -2 FROM meals.ingredients",
+    "INSERT INTO meals.prices (ingredient_id, unit, per_unit) SELECT min(id), 'pcs', -3 FROM meals.ingredients",
+])
+def test_the_database_refuses_negative_amounts(conn, sql):
+    with pytest.raises(psycopg2.errors.CheckViolation):
+        q(conn, sql)
+
+
+def test_deleting_an_item_keeps_old_meals(conn):
+    from meals.actions import ingredient_delete_statements
+    ing = q(conn, "INSERT INTO meals.ingredients (name, unit) VALUES ('Test plantain chips', 'pcs') RETURNING id")[0][0]
+    old, future = (r[0] for r in q(conn, "INSERT INTO meals.plan (day, slot, ingredient_id, qty, status) VALUES "
+                                         "(CURRENT_DATE - 60, 'Lunch', %s, 1, 'done'), "
+                                         "(CURRENT_DATE + 3, 'Lunch', %s, 1, 'planned') RETURNING id", (ing, ing)))
+    try:
+        with conn.cursor() as cur:
+            for sql, params in ingredient_delete_statements(ing, "Test plantain chips"):
+                cur.execute(sql, params)
+        assert q(conn, "SELECT label, ingredient_id FROM meals.plan WHERE id = %s", (old,)) == \
+            [("Test plantain chips", None)], "60 days back, outside what the app loads, and still kept"
+        assert q(conn, "SELECT count(*) FROM meals.plan WHERE id = %s", (future,))[0][0] == 0
+        assert q(conn, "SELECT count(*) FROM meals.ingredients WHERE id = %s", (ing,))[0][0] == 0
+    finally:
+        q(conn, "DELETE FROM meals.plan WHERE id IN (%s, %s)", (old, future))
+        q(conn, "DELETE FROM meals.ingredients WHERE id = %s", (ing,))

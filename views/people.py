@@ -68,6 +68,7 @@ def _owner_tools(user):
                            file_name=backup_filename(), mime="application/zip", icon=":material/download:",
                            key="backup_dl", on_click="ignore")
         st.caption("Keep it somewhere private: it includes everyone's records. To load one back in, use restore.py.")
+        backup_status(b)
 
     users = b.users
     with card("people"):
@@ -157,7 +158,7 @@ def _reminders():
     from datetime import datetime
 
     from core.data import book as money_book
-    from meals.briefing import evening, morning
+    from meals.briefing import evening, morning, stocktake
     from meals.data import kitchen
     from notify import SendError, send
 
@@ -165,10 +166,18 @@ def _reminders():
         section("What gets sent")
         st.write("Every morning at 6:00: today's meals and what each is missing, what to buy (food, then household "
                  "supplies), and the total budget left for the month. In the evening, only when something needs "
-                 "doing tonight. On the 1st of each month, a short report on the month before.")
+                 "doing tonight. On Sunday evenings, a stock check of the pantry items used most that week. On the "
+                 "1st of each month, a short report on the month before.")
         k, b = kitchen(), money_book()
         now = datetime.now()
-        tab_m, tab_e, tab_r, tab_s = st.tabs(["Morning preview", "Evening preview", "Monthly report", "Set up"])
+        tab_m, tab_e, tab_w, tab_r, tab_s = st.tabs(["Morning preview", "Evening preview", "Sunday stock check",
+                                                     "Monthly report", "Set up"])
+        with tab_w:
+            msg = stocktake(k, now)
+            if msg:
+                st.html(f'<div class="tg-preview">{_as_html(msg)}</div>')
+            else:
+                st.caption("Nothing was cooked in the last 7 days, so no stock check would be sent.")
         with tab_r:
             from core.report import monthly
             st.caption("Sent on the 1st of each month, about the month before.")
@@ -221,3 +230,25 @@ def _reminders():
                     st.error(str(exc))
                 except Exception as exc:
                     st.error(f"Couldn't send: {exc}")
+
+
+def backup_status(b):
+    """When the daily GitHub backup last ran, or what to do if it never has or has stopped."""
+    last, age = b.last_backup, b.backup_age_days()
+    if last is None:
+        field_msg("No automatic backup has run yet. In your GitHub repository, add a secret called "
+                  "BACKUP_PASSPHRASE (Settings → Secrets and variables → Actions). The daily job then saves an "
+                  "encrypted copy every morning.", "hint")
+        return
+    when = last["at"].astimezone().strftime("%a %d %b, %H:%M")
+    if age >= BACKUP_LATE_DAYS:
+        field_msg(f"The daily backup has stopped: the last one was {age} days ago ({when}). On GitHub, open "
+                  "Actions → Daily to see what went wrong.", "warn")
+    else:
+        rows = last.get("rows")
+        field_msg(f"Last automatic backup: {when} ({last.get('kb', '?')} KB"
+                  + (f", {rows:,} rows)." if isinstance(rows, int) else ")."), "ok")
+
+
+BACKUP_LATE_DAYS = 3
+

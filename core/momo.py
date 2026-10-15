@@ -18,7 +18,7 @@ CATEGORY_HINTS = [
     (r"\bgwcl\b|ghana water", ["Water for washing and bathing"]),
     (r"\bgas\b|\blpg\b", ["Gas"]),
     (r"pharma|chemist|hospital|clinic", ["Medications", "Hospital bills"]),
-    (r"uber|bolt|yango|trotro|taxi", ["Other"]),  # Transportation's "Other"
+    (r"uber|bolt|yango|trotro|taxi", ["Other transport"]),
 ]
 MOMO_ACCOUNT = re.compile(r"momo|mobile money|\bmtn\b|telecel|vodafone|airtel|\bat money\b", re.I)
 

@@ -11,7 +11,7 @@ import streamlit as st
 
 from core.db import transact
 from meals.logic import OPEN, ROLE_ORDER, allocate, reminders
-from meals.units import base_of, make_pack
+from meals.units import base_of, fmt_stock, make_pack
 
 TTL = int(os.environ.get("CASHEW_CACHE_SECONDS", "60"))  # tests shorten this
 HOUSEHOLD_KEY = "meals_household"
@@ -221,6 +221,41 @@ class Kitchen:
         return reminders(now, self.entries(today, today + timedelta(days=1)), self.recipes, self.items, self.pantry,
                          self.fridge, self.names, self.household, packs=self.packs, alloc=self.allocation(today),
                          fun=self.fun, low_levels=food_low, usual=self.unit_of)
+
+    def urgent(self, now=None):
+        """The reminders worth a line in the morning message: prep to start (soak the beans), and fridge food
+        past its date or to eat by today or tomorrow. Plain text, no jokes: [text]."""
+        now = now or datetime.now()
+        today = now.date()
+        food_low = {key: v for key, v in self.low_levels.items() if key[0] not in self.supplies}
+        notes = reminders(now, self.entries(today, today + timedelta(days=1)), self.recipes, self.items, self.pantry,
+                          self.fridge, self.names, self.household, packs=self.packs, alloc=self.allocation(today),
+                          fun=False, low_levels=food_low, usual=self.unit_of, with_kind=True)
+        return [text for _, text, kind in notes if kind in ("prep", "past", "eat_soon")]
+
+    def stocktake(self, today=None, days=7, most=10):
+        """The pantry items used most in the last week, to count by hand: [(name, what the pantry says)].
+        Stock drifts (gifts, borrowing, cooking that was never ticked), and every missing / running-low
+        line is only as right as these numbers."""
+        today = today or date.today()
+        used = defaultdict(int)
+        for e in self.entries(today - timedelta(days=days), today):
+            if e["status"] != "cooked":
+                continue
+            if e.get("recipe_id"):
+                for ing, _, _ in self.items.get(e["recipe_id"], []):
+                    used[ing] += 1
+            elif e.get("ingredient_id"):
+                used[int(e["ingredient_id"])] += 1
+        picked = sorted((i for i in used if i not in self.supplies and i in self.names),
+                        key=lambda i: (-used[i], self.names[i].lower()))[:most]
+        out = []
+        for i in picked:
+            usual = self.unit_of.get(i, "pcs")
+            base = base_of(usual)
+            have = float(self.pantry.get((i, base), 0.0))
+            out.append((self.names[i], fmt_stock(have, base, self.pack(i), usual) if have > 0 else "none"))
+        return out
 
     def food_low(self):
         """Food staples at or below their warning level, by name (household supplies have supplies_low)."""

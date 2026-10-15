@@ -12,7 +12,7 @@ SEED_CATEGORIES = [
     ("Utility", "Expense", ["Electricity", "Water for washing and bathing", "Internet Data", "Telephone calls credit", "Gas", "Firewood", "Trash"]),
     ("Health", "Expense", ["Medications", "Hospital bills"]),
     ("Toiletries", "Expense", ["Supplies"]),
-    ("Transportation", "Expense", ["Work", "Meetings", "Other"]),
+    ("Transportation", "Expense", ["Work", "Meetings", "Other transport"]),
     ("Family", "Expense", ["Mother", "Others"]),
     ("Purpose", "Expense", ["Sewing", "Assembly and conventions", "Store", "Maintenance", "Shirt/Dress", "Utensils"]),
     ("Other", "Expense", ["Debt - work", "Charges", "Salon/Barber", "Coins savings"]),
@@ -21,6 +21,8 @@ SEED_CATEGORIES = [
 SEED_ACCOUNTS = ["Cash", "GCB", "Susu", "Fidelity - Emergency", "Flip"]
 # Accounts whose names sound like savings don't count as everyday money for "Safe to spend" (editable in the app).
 SAVINGS_WORDS = "(susu|emergency|saving|invest|fixed|pension|t-bill)"
+
+from meals.schema import never_negative  # noqa: E402  (shared with the kitchen tables)
 
 TABLES = [
     """
@@ -136,6 +138,11 @@ TABLES = [
     "CREATE INDEX IF NOT EXISTS goal_contributions_goal_idx ON goal_contributions (goal_id)",
     "CREATE INDEX IF NOT EXISTS sessions_user_idx ON sessions (user_id)",
 ]
+# Money is never negative in the database itself, whatever a form or a script gets wrong. (Opening balances can be:
+# an overdrawn account.)
+TABLES += (never_negative("transactions", "amount") + never_negative("recurring_rules", "amount", "fee")
+           + never_negative("budgets", "monthly_limit") + never_negative("goals", "target")
+           + never_negative("goal_contributions", "amount"))
 
 
 def _version():
@@ -150,6 +157,28 @@ def _version():
 
 
 SCHEMA_KEY = "schema_version"
+
+
+# A category with the same name as a group makes a budget ambiguous ("Other" the group, or Transportation's
+# "Other"?); a budget always means the group, so the category could never have one. Older databases were
+# seeded that way; the category is renamed, everywhere its name is stored.
+RENAMES = {("other", "transportation"): "Other transport"}
+CATEGORY_COLUMNS = ["transactions", "recurring_rules", "meals.ingredients", "meals.recipes"]
+
+
+def untangle_names(cur):
+    """Rename any category that shares its name with a group it isn't in: Transportation's "Other" becomes
+    "Other transport"; any other becomes "Name (Group)". Budgets keep meaning the group. Safe to run again."""
+    cur.execute("SELECT c.name, c.group_name FROM categories c WHERE EXISTS "
+                "(SELECT 1 FROM categories g WHERE lower(g.group_name) = lower(c.name) AND g.group_name <> c.group_name)")
+    for name, group in cur.fetchall():
+        new = RENAMES.get((name.lower(), group.lower()), f"{name} ({group})")[:50]
+        cur.execute("SELECT 1 FROM categories WHERE lower(name) = lower(%s)", (new,))
+        if cur.fetchone():
+            continue  # already taken: leave it for the owner to sort out in Settings
+        cur.execute("UPDATE categories SET name = %s WHERE name = %s", (new, name))
+        for table in CATEGORY_COLUMNS:
+            cur.execute(f"UPDATE {table} SET category = %s WHERE category = %s", (new, name))
 
 
 def ensure_schema(conn):
@@ -186,6 +215,7 @@ def ensure_schema(conn):
             cur.execute("INSERT INTO accounts (name, spendable) VALUES (%s, NOT (%s ~* %s)) ON CONFLICT (name) DO NOTHING",
                         (acct, acct, SAVINGS_WORDS))
         cur.execute("INSERT INTO app_meta (key, value) VALUES ('seeded_v2', 'yes')")
+    untangle_names(cur)
     seed_kitchen(cur)
     cur.execute("INSERT INTO app_meta (key, value) VALUES (%s, %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
                 (SCHEMA_KEY, version))

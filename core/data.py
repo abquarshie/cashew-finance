@@ -4,8 +4,9 @@ Everything is read in one database trip and prepared once, then shared by every
 open session until something is saved (or for a minute, to pick up entries the
 daily job adds). Pages only read from it; they never change it in place.
 """
+import json
 import os
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from functools import cached_property
 
 import pandas as pd
@@ -48,7 +49,7 @@ SMALL = {
                  "FROM goal_contributions c JOIN goals g ON g.id = c.goal_id ORDER BY c.date DESC, c.id DESC LIMIT 200"),
     "users": (["id", "username", "display_name", "is_owner", "last_login", "created_at"],
               "SELECT id, username, display_name, is_owner, last_login, created_at FROM users ORDER BY id"),
-    "features": (["key", "value"], "SELECT key, value FROM app_meta WHERE key LIKE 'feature_%'"),
+    "features": (["key", "value"], "SELECT key, value FROM app_meta WHERE key LIKE 'feature_%' OR key = 'last_backup'"),
     # hashes of the sign-ins still valid, so an open browser is signed out once its session is ended elsewhere
     "sessions": (["token_hash"], "SELECT token_hash FROM sessions WHERE expires_at > now()"),
 }
@@ -144,6 +145,26 @@ class Book:
     def feature(self, name):
         """Parts of the app that can be switched off in Settings (kitchen, goals, reminders). On unless turned off."""
         return self._features.get(f"feature_{name}", "on") != "off"
+
+    @property
+    def last_backup(self):
+        """The last backup the daily GitHub job saved: {"at": datetime (UTC), "kb", "rows"}, or None if none yet."""
+        raw = self._features.get("last_backup")
+        if not raw:
+            return None
+        try:
+            info = json.loads(raw)
+            return {**info, "at": datetime.fromisoformat(info["at"])}
+        except (ValueError, KeyError, TypeError):
+            return None
+
+    def backup_age_days(self, now=None):
+        """Whole days since the last automatic backup, or None if there has never been one."""
+        last = self.last_backup
+        if last is None:
+            return None
+        now = now or datetime.now(timezone.utc)
+        return (now - last["at"]).days
 
     # ---- categories -------------------------------------------------------
     def category_names(self, kind=None):

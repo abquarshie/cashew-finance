@@ -167,6 +167,8 @@ def morning(k, book, now):
         🍽️ Today's Meals
         • Breakfast: Lipton tea + Round sugar bread ✔️
         • Lunch: Kokonte + Groundnut soup 🛒 (Missing: 2 cups Kokonte powder)
+        ⚠️ Heads-up                       (only when something is urgent)
+        • Eat the 2 portions of Light soup by today.
         🛒 Things to Buy
         • Pantry / Food: Kokonte powder (2 cups), Eggs, Lipton
         • Household: Bar soap, Bin bags
@@ -183,6 +185,10 @@ def morning(k, book, now):
             note = f" (Missing: {label[len('missing '):]})" if status == "short" else ""
             meals.append(f"• {slot}: {escape(k.meal_name(parts))} {STATUS_ICON[status]}{escape(note)}")
     out += meals or ["• Nothing planned yet."]
+
+    urgent = k.urgent(now)
+    if urgent:
+        out += ["", "⚠️ <b>Heads-up</b>"] + [f"• {escape(text)}" for text in urgent[:4]]
 
     food = [f"{name} ({amount})" if amount else name for name, amount in _today_shopping(k, today)]
     named = {f.split(" (")[0] for f in food}
@@ -202,6 +208,20 @@ def morning(k, book, now):
             out += ["", "💰 <b>Financial Standing</b>", f"• Total Budget Left for the Month: {line}"]
         except Exception:
             pass
+    return "\n".join(out)
+
+
+def stocktake(k, now):
+    """Sunday evening: the pantry items used most this week, to count and correct. HTML text, or None
+    when nothing was cooked this week."""
+    items = k.stocktake(now.date())
+    if not items:
+        return None
+    out = ["🧮 <b>Sunday stock check</b>", "",
+           "These were used most this week. Check how much is really left, and fix any that are off in "
+           "Cashew → Pantry / Inventory:", ""]
+    out += [f"• {escape(name)}: {escape(have)}" for name, have in items]
+    out += ["", "Two minutes now keeps the shopping list and the morning message right."]
     return "\n".join(out)
 
 

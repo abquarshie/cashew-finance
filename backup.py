@@ -5,13 +5,30 @@
 If BACKUP_PASSPHRASE is set the backup is encrypted (the GitHub Action always sets it).
 Use restore.py to load a backup back in.
 """
+import json
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import psycopg2
 
 from core.backup import backup_filename, encrypt, export_zip
+
+
+def record(url, size, rows):
+    """Note when the daily backup ran, so the app can warn the owner if it stops. Never fails the backup."""
+    try:
+        info = {"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "kb": round(size / 1024), "rows": rows}
+        conn = psycopg2.connect(url, connect_timeout=20)
+        try:
+            with conn, conn.cursor() as cur:
+                cur.execute("INSERT INTO app_meta (key, value) VALUES ('last_backup', %s) "
+                            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", (json.dumps(info),))
+        finally:
+            conn.close()
+    except Exception as exc:
+        print(f"(Couldn't note the backup time: {exc})")
 
 
 def main():
@@ -34,6 +51,8 @@ def main():
     path = folder / backup_filename(encrypted=bool(passphrase))
     path.write_bytes(data)
     total = sum(counts.values())
+    if os.environ.get("GITHUB_ACTIONS"):
+        record(url, len(data), total)
     print(f"Saved {path} ({len(data) / 1024:.0f} KB, {total} rows: "
           + ", ".join(f"{n} {t}" for t, n in counts.items() if n) + ")")
 

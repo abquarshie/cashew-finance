@@ -117,6 +117,11 @@ if theme_missing() and user["is_owner"]:
                "Make sure the **.streamlit** folder (with config.toml inside) is in your GitHub repository, in the "
                "same folder as app.py, then reboot the app. On a Mac, Finder hides folders starting with a dot: "
                "press Cmd+Shift+. to see it before uploading.", icon=":material/palette:")
+# Backups that quietly stop are the worst kind: tell the owner on every page until they run again.
+_age = book().backup_age_days()
+if user["is_owner"] and _age is not None and _age >= 3:
+    st.warning(f"The daily backup hasn't run for {_age} days. On GitHub, open Actions → Daily to see why. "
+               "Settings → People has the details.", icon=":material/cloud_off:")
 
 # On a phone the menu covers the page; close it after a page is picked from it.
 if st.session_state.get("_last_page") not in (None, page.url_path):
