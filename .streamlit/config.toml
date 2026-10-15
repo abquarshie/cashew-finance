@@ -1,0 +1,36 @@
+[server]
+# serves the static/ folder: the home-screen icon and its manifest
+enableStaticServing = true
+
+[client]
+showSidebarNavigation = true
+toolbarMode = "minimal"
+
+[theme]
+font = "Manrope:https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap"
+headingFontWeights = [800, 700, 700, 700, 700, 700]
+baseRadius = "10px"
+buttonRadius = "12px"
+showWidgetBorder = true
+
+[theme.light]
+primaryColor = "#14A38F"
+backgroundColor = "#F5F7F8"
+secondaryBackgroundColor = "#EBF0F1"
+textColor = "#0F1B22"
+borderColor = "#DCE3E6"
+linkColor = "#0E7F6F"
+
+[theme.light.sidebar]
+backgroundColor = "#FFFFFF"
+
+[theme.dark]
+primaryColor = "#14A38F"
+backgroundColor = "#0E1417"
+secondaryBackgroundColor = "#1A2327"
+textColor = "#E6ECEF"
+borderColor = "#2A353A"
+linkColor = "#5ED6C3"
+
+[theme.dark.sidebar]
+backgroundColor = "#121A1D"
