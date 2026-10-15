@@ -463,8 +463,8 @@ def test_phone_messages(conn):
     today = date.today()
     assert text.startswith(f"☀️ <b>{today:%A}, {today.day} {today:%b}</b>")
     assert "🍽️ <b>Today's Meals</b>" in text and "💰 <b>Financial Standing</b>" in text
-    left = b.budget_total(pd.Period(today, "M"))["left"]
-    assert f"• Total Budget Left for the Month: GH₵{left:,.2f}" in text
+    from meals.briefing import money_lines
+    assert "\n".join(money_lines(b, today)) in text, "the 💰 lines come from the everyday-money rules"
     assert "<script" not in text
     msg = evening(k, datetime.now())
     assert msg is None or msg.startswith("🌙 <b>For tomorrow")
@@ -934,3 +934,55 @@ def test_deleting_an_item_keeps_old_meals(conn):
     finally:
         q(conn, "DELETE FROM meals.plan WHERE id IN (%s, %s)", (old, future))
         q(conn, "DELETE FROM meals.ingredients WHERE id = %s", (ing,))
+
+
+# ---- everyday money vs savings ----------------------------------------------------------------------------
+def _book_with(everyday, savings, budget_left):
+    """A stand-in book: one everyday account, one savings account, and this month's budgets."""
+    from types import SimpleNamespace
+    accounts = {"GCB": everyday, **({} if savings is None else {"Susu": savings})}  # None: no savings account
+    fake = SimpleNamespace(everyday_accounts=["GCB"], balances=lambda: pd.Series(accounts, dtype=float),
+                           budget_total=lambda period: None if budget_left is None else
+                           {"limit": 1000.0, "spent": 1000.0 - budget_left, "left": budget_left})
+    fake.spending_power = lambda today=None: Book.spending_power(fake, today)
+    return fake
+
+
+@pytest.mark.parametrize("everyday,savings,budget_left,state,left", [
+    (800, 5000, 300, "ok", 300),               # budgets are the limit
+    (120, 5000, 300, "capped", 120),           # only 120 in everyday accounts: savings don't top it up
+    (-150, 5000, 300, "debt", -150),           # overdrawn: shown as a debt, savings untouched
+    (0, 5000, 300, "empty", 0),                # nothing left to spend
+    (800, 5000, -40, "over_budget", -40),      # money's there, but the budgets are overspent
+    (800, 5000, None, "no_budget", 800),       # no budgets: all the everyday money
+])
+def test_only_everyday_money_can_be_spent(everyday, savings, budget_left, state, left):
+    p = _book_with(everyday, savings, budget_left).spending_power(date.today())
+    assert (p["state"], p["left"]) == (state, left)
+    assert p["savings"] == savings and p["everyday"] == everyday and p["has_savings"]
+    assert p["debt"] == max(-everyday, 0)
+
+
+def test_the_morning_money_lines_keep_savings_apart():
+    from meals.briefing import money_lines
+    debt = money_lines(_book_with(-150, 5000, 300), date.today())
+    assert debt[0] == "• Everyday accounts in debt: GH₵-150.00"
+    assert debt[1].startswith("• Total Budget Left for the Month: GH₵0.00")
+    assert debt[-1] == "• Savings (kept separate, not counted): GH₵5,000.00"
+    capped = money_lines(_book_with(120, None, 300), date.today())
+    assert capped == ["• Total Budget Left for the Month: GH₵120.00 (budgets allow GH₵300.00, but that's all the "
+                      "everyday accounts hold)"], "no savings line when there's no savings account"
+    assert money_lines(_book_with(800, 10, 300), date.today())[0] == "• Total Budget Left for the Month: GH₵300.00"
+    assert money_lines(_book_with(800, 0, 300), date.today())[-1] == \
+        "• Savings (kept separate, not counted): GH₵0.00", "an empty savings account is still shown apart"
+
+
+def test_savings_accounts_never_count_as_spending_money(book_now):
+    b = book_now
+    p = b.spending_power()
+    bal = b.balances()
+    assert "Susu" not in b.everyday_accounts and "Fidelity - Emergency" not in b.everyday_accounts
+    assert p["everyday"] == pytest.approx(sum(v for n, v in bal.items() if n in b.everyday_accounts))
+    assert p["savings"] == pytest.approx(bal["Susu"] + bal["Fidelity - Emergency"])
+    assert p["left"] <= max(p["everyday"], 0) or p["state"] in ("debt", "over_budget")
+

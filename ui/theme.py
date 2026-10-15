@@ -82,16 +82,22 @@ div.st-key-card-savebar { position: sticky; bottom: 14px; z-index: 20; border-co
   margin: .25rem 0 .3rem; font-variant-numeric: tabular-nums; position: relative; z-index: 1; }
 .hero.over { background: var(--feature-over); }
 .hero.over .hero-label { color: var(--feature-over-muted); }
-.hero-value.none { font-size: 1.5rem; margin: .45rem 0 .1rem; }
+.hero-note { color: var(--feature-text); opacity: .86; font-size: .84rem; font-weight: 600; line-height: 1.4;
+  position: relative; z-index: 1; max-width: 34rem; }
+.hero-savings { display: inline-block; margin-top: .6rem; padding: .25rem .6rem; border-radius: 999px;
+  background: rgba(255,255,255,.12); color: var(--feature-text); font-size: .76rem; font-weight: 700;
+  position: relative; z-index: 1; }
 .kpi-grid.two { grid-template-columns: 1fr 1fr; }
 .bal-rows { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); column-gap: 1.4rem; margin: 0 0 .3rem; }
 .bal-row { display: flex; justify-content: space-between; gap: .6rem; font-size: .9rem; padding: .4rem 0;
   border-bottom: 1px solid var(--line); }
 .bal-row span { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.bal-row span i { font-style: normal; font-size: .68rem; font-weight: 700; padding: 0 6px; border-radius: 999px;
-  background: var(--neutral-soft); margin-left: 4px; }
 .bal-row b { font-weight: 750; font-variant-numeric: tabular-nums; }
 .bal-row b.neg { color: var(--out); }
+.bal-group + .bal-group { margin-top: .9rem; }
+.bal-head { display: flex; justify-content: space-between; font-weight: 750; font-size: .92rem; }
+.bal-head b.neg { color: var(--out); }
+.bal-note { color: var(--muted); font-size: .76rem; margin-bottom: .1rem; }
 /* ---- Today card: what to cook and whether it's all in ---- */
 .today-head { font-size: 1rem; font-weight: 750; letter-spacing: -.01em; margin-bottom: .35rem; }
 .today-row { padding: .45rem 0; border-top: 1px solid var(--line); font-size: .9rem; line-height: 1.35; }

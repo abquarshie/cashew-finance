@@ -6,8 +6,6 @@ shows exactly the same thing on Home, on the meal plan and in the preview.
 from datetime import date, timedelta
 from html import escape
 
-import pandas as pd
-
 from meals.logic import (GUARD_JOKE, OPEN, SLOTS, bought_cost, budget_guard, food_budget, meal_status,
                           shopping_list, shortfall)
 from meals.quips import with_joke
@@ -159,6 +157,31 @@ def _today_shopping(k, today):
     return [(k.names.get(ing, "?"), fmt(q, base, k.unit_of.get(ing))) for (ing, base), q in total.items()]
 
 
+def money_lines(book, today):
+    """The 💰 lines: what can really be spent (never more than the everyday accounts hold), a debt said plainly,
+    and savings on their own line, never counted."""
+    p = book.spending_power(today)
+
+    def cedi(x):
+        return f"GH₵{x:,.2f}"  # the sample's style: GH₵-2,072.55
+    state = p["state"]
+    if state == "debt":
+        lines = [f"• Everyday accounts in debt: {cedi(p['everyday'])}",
+                 "• Total Budget Left for the Month: GH₵0.00 (nothing to spend until money comes in)"]
+    elif state == "empty":
+        lines = ["• Total Budget Left for the Month: GH₵0.00 (everyday money is used up)"]
+    elif state == "no_budget":
+        lines = [f"• Everyday money: {cedi(p['everyday'])} (no monthly budgets set)"]
+    elif state == "capped":
+        lines = [f"• Total Budget Left for the Month: {cedi(p['left'])} "
+                 f"(budgets allow {cedi(p['budget']['left'])}, but that's all the everyday accounts hold)"]
+    else:  # ok, or over_budget (a negative figure)
+        lines = [f"• Total Budget Left for the Month: {cedi(p['left'])}"]
+    if p["has_savings"]:
+        lines.append(f"• Savings (kept separate, not counted): {cedi(p['savings'])}")
+    return lines
+
+
 def morning(k, book, now):
     """The morning message: today's meals, what to buy, and what's left of the month's budgets.
     Returns HTML text for Telegram, e.g.
@@ -203,9 +226,7 @@ def morning(k, book, now):
 
     if book is not None:
         try:
-            t = book.budget_total(pd.Period(today, "M"))
-            line = f"GH₵{t['left']:,.2f}" if t else "no monthly budgets set"
-            out += ["", "💰 <b>Financial Standing</b>", f"• Total Budget Left for the Month: {line}"]
+            out += ["", "💰 <b>Financial Standing</b>"] + [escape(x) for x in money_lines(book, today)]
         except Exception:
             pass
     return "\n".join(out)

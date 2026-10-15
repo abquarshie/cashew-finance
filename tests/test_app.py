@@ -92,12 +92,16 @@ def test_dashboard_layout(phone, app_url):
     assert [tiles.nth(i).locator(".kpi-label").inner_text() for i in range(tiles.count())] == ["Income", "Expenses"]
 
     balances = phone.locator('[data-testid="stExpander"]').filter(has_text="Account balances")
-    assert "in all" in balances.locator("summary").inner_text(), "the total sits on the fold"
-    assert not phone.locator(".bal-rows").is_visible(), "balances are one tap below"
+    fold = balances.locator("summary").inner_text()
+    assert "everyday" in fold and "savings" in fold, "both totals sit on the fold, apart"
+    assert not phone.locator(".bal-group").first.is_visible(), "balances are one tap below"
     balances.locator("summary").click()
     settle(phone)
-    rows = phone.locator(".bal-rows").inner_text()
-    assert "MoMo" in rows and "savings" in rows, "every account listed, savings marked"
+    groups = phone.locator(".bal-group")
+    assert groups.count() == 2
+    assert groups.nth(0).inner_text().startswith("Everyday money") and "MoMo" in groups.nth(0).inner_text()
+    assert groups.nth(1).inner_text().startswith("Savings") and "Susu" in groups.nth(1).inner_text()
+    assert "Susu" not in groups.nth(0).inner_text(), "savings never sit with everyday money"
 
     assert phone.get_by_role("button", name="Add an entry").is_visible()
     assert not amount_box(phone).count(), "the form only appears when Add is tapped"
@@ -478,4 +482,31 @@ def test_the_icon_also_replaces_the_hosts_crown(browser, app_url):
     links = page.eval_on_selector_all('link[rel="manifest"]', "els => els.map(e => e.href)")
     assert len(links) == 1 and links[0].endswith("/app/static/manifest.json"), links
     ctx.close()
+
+
+def test_the_banner_shows_an_everyday_debt_and_leaves_savings_alone(phone, app_url, conn):
+    """Everyday accounts overdrawn: the banner says so in dark red, the figure is the debt, and the savings
+    sit apart, untouched."""
+    from core.data import Book, _load_frames
+    b = Book(_load_frames(conn))
+    made = []
+    for n, a in enumerate(b.everyday_accounts):  # empty every everyday account, then 100 more out of the first
+        out = round(b.balance(a) + (100 if n == 0 else 0), 2)
+        if out > 0:
+            made.append(q(conn, "INSERT INTO transactions (date, type, category, amount, member, account) "
+                                "VALUES (CURRENT_DATE, 'Expense', 'Gas', %s, 'Household', %s) RETURNING id",
+                          (out, a))[0][0])
+    assert Book(_load_frames(conn)).spending_power()["everyday"] == pytest.approx(-100)
+    try:
+        phone.wait_for_timeout(1500)
+        sign_in(phone, app_url)
+        hero = phone.locator(".hero")
+        assert hero.get_attribute("data-state") == "debt" and "over" in hero.get_attribute("class")
+        text = hero.inner_text()
+        assert "Everyday accounts in debt" in text and "−GH₵100.00" in text, text
+        assert "🔒 Savings" in text and "not counted" in text, "savings shown apart, never used to cover it"
+        phone.screenshot(path="tests/screenshots/banner-everyday-debt.png")
+    finally:
+        if made:
+            q(conn, "DELETE FROM transactions WHERE id IN %s", (tuple(made),))
 

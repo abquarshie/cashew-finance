@@ -332,6 +332,41 @@ class Book:
         spent = sum(s["spent"] for s in counted)
         return {"limit": limit, "spent": spent, "left": limit - spent}
 
+    def spending_power(self, today=None):
+        """What can really be spent this month: the budgets that are left, but never more than the everyday
+        accounts hold. Savings accounts are never counted, however much is in them; moving money out of
+        savings (a transfer) is the only way it becomes spendable.
+
+        Returns {"left": the figure to show, "state", "everyday", "savings", "has_savings", "debt", "budget"},
+        where state is
+          "debt"         everyday accounts are below zero: left is that (negative) balance
+          "empty"        everyday accounts are at exactly zero: left is 0
+          "over_budget"  there's money, but this month's budgets are overspent: left is the overspend (negative)
+          "capped"       budgets allow more than the everyday accounts hold: left is what they hold
+          "ok"           left is what's left of the budgets
+          "no_budget"    no budgets set: left is the everyday money
+        """
+        today = today or date.today()
+        bal = self.balances()
+        everyday_names = set(self.everyday_accounts)
+        everyday = round(float(sum(v for n, v in bal.items() if n in everyday_names)), 2)
+        savings = round(float(sum(v for n, v in bal.items() if n not in everyday_names)), 2)
+        budget = self.budget_total(pd.Period(today, "M"))
+        has_savings = any(n not in everyday_names for n in bal.index)
+        out = {"everyday": everyday, "savings": savings, "has_savings": has_savings, "debt": max(-everyday, 0.0),
+               "budget": budget}
+        if everyday < 0:
+            return {**out, "state": "debt", "left": everyday}
+        if everyday == 0:
+            return {**out, "state": "empty", "left": 0.0}
+        if budget is None:
+            return {**out, "state": "no_budget", "left": everyday}
+        if budget["left"] < 0:
+            return {**out, "state": "over_budget", "left": budget["left"]}
+        if budget["left"] > everyday:
+            return {**out, "state": "capped", "left": everyday}
+        return {**out, "state": "ok", "left": budget["left"]}
+
     # ---- safe to spend ---------------------------------------------------------
     @cached_property
     def everyday_accounts(self):
