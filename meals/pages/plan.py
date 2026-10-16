@@ -20,6 +20,10 @@ DONE_LABEL = {"cooked": "Cooked", "from_fridge": "From the fridge", "done": "Eat
 SPANS = ["Next 7 days", "Days 8 to 14"]
 
 
+def people_text(n):
+    return f"{frac(n)} {'person' if abs(n - 1) < 1e-9 else 'people'}"
+
+
 def _next_slot(now=None):
     h = (now or datetime.now()).hour
     return "Breakfast" if h < 10 else ("Lunch" if h < 15 else "Supper")
@@ -33,9 +37,9 @@ def _toggle(entry_id, kind, status):
         flash("Unticked. The pantry and fridge are back as they were.", ":material/undo:")
         return
     if kind == "recipe":
-        short = actions.mark_cooked(entry_id, k.household)
+        short = actions.mark_cooked(entry_id, k.slot_people)
         e = next((x for x in k.plan if x["id"] == entry_id), None)
-        left = max(e["qty"] - min(k.household, e["qty"]), 0) if e else 0
+        left = max(e["qty"] - min(k.people(e), e["qty"]), 0) if e else 0
         keeps = k.recipes.get(e["recipe_id"], {}).get("keeps_days", 3) if e else 3
         if left and e and e["day"] + timedelta(days=keeps) < date.today():
             msg = "Cooked. It was too long ago for leftovers to still be good, so nothing went into the fridge."
@@ -60,7 +64,7 @@ def _toggle_meal(ids, done):
         actions.untick_meal(list(ids))
         flash("Unticked. The pantry, fridge and any payment are back as they were.", ":material/undo:")
         return
-    out = actions.mark_meal(list(ids), k.household)
+    out = actions.mark_meal(list(ids), k.slot_people)
     bits = []
     if out["cooked"]:
         bits.append("cooked " + " and ".join(out["cooked"]))
@@ -74,7 +78,7 @@ def _toggle_meal(ids, done):
 
 def _from_fridge(entry_id):
     k = kitchen()
-    missing = actions.mark_from_fridge(entry_id, k.household)
+    missing = actions.mark_from_fridge(entry_id, k.slot_people)
     flash("Eaten from the fridge" + (f" ({missing:g} portions short)" if missing else ""), ":material/kitchen:")
 
 
@@ -182,7 +186,7 @@ def _part_note(k, e, today):
     if e["status"] != OPEN:
         return text + f" ({DONE_LABEL.get(e['status'], 'done').lower()})"
     if e.get("recipe_id") and not k.is_bought(e):
-        extra = e["qty"] - min(k.household, e["qty"])
+        extra = e["qty"] - min(k.people(e), e["qty"])
         if extra > 1e-9:
             text += f" ({frac(extra)} into the fridge)"
     if e["day"] >= today:
@@ -208,7 +212,7 @@ def _meal_row(k, parts, today):
                "bought": "🛍️"}.get(status, "")
     else:
         tag = "· Done" if done else ""
-    who = f"{k.household} {'person' if k.household == 1 else 'people'}"
+    who = people_text(k.meal_people(d, slot))
     if home or done:
         ticked = home_done if home else done
         row.checkbox(f"{name} · {who} {tag}".rstrip(), value=ticked,
@@ -270,6 +274,12 @@ def _add_form():
         "Tomorrow" if d == today + timedelta(days=1) else f"{d:%a %d}"))
     st.pills("Meal", SLOTS, key="meal_add_slot", required=True)  # tapping the picked one again keeps it
     day, slot = ss.get("meal_add_day") or days[0], ss.get("meal_add_slot") or "Supper"
+    usual = float(k.slot_people.get(slot, k.household))
+    now_set = k.meal_people(day, slot)
+    people = st.number_input("People eating", min_value=0.0, max_value=50.0, step=1.0, format="%g", value=now_set,
+                             key=f"meal_add_people_{day}_{slot}",
+                             help=f"Usually {frac(usual)} at {slot.lower()} (change that under Meals → Fridge → "
+                                  "Settings). Change it here for just this meal: guests, or someone away.")
 
     options = ([f"p:{i}" for i in k.pairings]
                + [f"r:{i}" for i in sorted(k.recipes, key=lambda i: k.recipes[i]["name"].lower())]
@@ -306,7 +316,7 @@ def _add_form():
             r = k.recipes[i]
             unit = r["count_unit"]
             qty = st.number_input(f"{name} ({plural(unit)})", min_value=0.25, step=0.5, format="%g",
-                                  value=float(max(k.household, 1)), key=f"meal_add_q_{ver}_{key}")
+                                  value=float(max(people, 1)), key=f"meal_add_q_{ver}_{key}")
             if r["price"]:
                 field_msg(f"About {money(r['price'] * qty)}, paid on the day" + (f" at {r['shop']}" if r["shop"] else "")
                           + ".", "hint")
@@ -316,20 +326,20 @@ def _add_form():
             # the week's soup is already in the fridge (or a big pot is planned earlier): plan just enough for
             # this meal; otherwise the whole pot, and what isn't eaten goes into the fridge
             leftover = r["role"] != "starch" and from_leftovers(
-                k.open_entries(*k.window(today)), k.recipes, k.items, k.pantry, k.fridge, k.household, today, day,
+                k.open_entries(*k.window(today)), k.recipes, k.items, k.pantry, k.fridge, people, today, day,
                 slot, i, k.packs)
             if r["role"] == "starch":  # cooked fresh for everyone eating
-                default = float(k.household)
+                default = float(max(people, 0.5))
             elif leftover:
-                default = float(min(k.household, r["portions"]))
+                default = float(max(min(people, r["portions"]), 0.5))
             else:
                 default = float(r["portions"])
             qty = st.number_input(f"{name} (portions to cook)", min_value=0.25, max_value=100.0, step=0.5, format="%g",
                                   value=default, key=f"meal_add_q_{ver}_{key}",
                                   help="Halves and quarters are fine: 2.5, 0.5…")
-            left = qty - min(k.household, qty)
+            left = qty - min(people, qty)
             notes = []
-            if leftover and qty <= k.household:
+            if leftover and qty <= people:
                 notes.append("comes from the leftovers in the fridge, no need to cook")
             else:
                 batch, each, unknown = recipe_cost(i, k.recipes, k.items, k.prices, k.packs)
@@ -348,7 +358,7 @@ def _add_form():
             units = units_for(k.unit_of[i], k.pack(i))
             c1, c2 = st.columns(2)
             qty = c1.number_input(f"{name} (how much)", min_value=0.0, step=0.5, format="%g",
-                                  value=float(side["qty"]) * k.household if side else 1.0, key=f"meal_add_q_{ver}_{key}")
+                                  value=float(side["qty"]) * people if side else 1.0, key=f"meal_add_q_{ver}_{key}")
             if side and side["unit"] in units and f"meal_add_u_{ver}_{key}" not in ss:
                 ss[f"meal_add_u_{ver}_{key}"] = side["unit"]
             unit = c2.selectbox(f"{name} unit", units, key=f"meal_add_u_{ver}_{key}", label_visibility="collapsed")
@@ -376,9 +386,12 @@ def _add_form():
             field_msg(f"One meal: {k.meal_name(meal)}{joins}.", "hint")
     label = f"Add {n} to {when}, {slot.lower()}" if n > 1 else f"Add to {when}, {slot.lower()}"
     if st.button(label, type="primary", disabled=not n, width="stretch", key="meal_add_go", icon=":material/add:"):
+        own = None if abs(people - usual) < 1e-9 else people  # the usual number isn't stored: it can change
         actions.add_many([{"day": day, "slot": slot, "recipe_id": ln.get("recipe_id"),
                            "ingredient_id": ln.get("ingredient_id"), "qty": ln["qty"], "unit": ln.get("unit"),
-                           "label": ln.get("label"), "price": ln.get("price")} for ln in lines])
+                           "label": ln.get("label"), "price": ln.get("price"), "people": own} for ln in lines])
+        if planned_here and abs(people - now_set) > 1e-9:  # one meal, one number: the dishes already there too
+            actions.set_meal_people(day, slot, own)
         for key in [x for x in ss.keys() if str(x).startswith(("meal_add_q_", "meal_add_u_", "meal_add_once_",
                                                                "meal_add_pick_"))]:
             ss.pop(key, None)
@@ -391,7 +404,8 @@ def render():
     k = kitchen()
     today = date.today()
     start, end = k.window(today)
-    page_header("Meal plan", f"Today to {end:%a %d %b} · {k.household} people per meal")
+    page_header("Meal plan", f"Today to {end:%a %d %b} · usually "
+                + ", ".join(f"{frac(k.slot_people[s])} at {s.lower()}" for s in SLOTS))
     view = st.segmented_control("Show", VIEWS, default=VIEWS[0], key="meal_view", required=True,
                                 label_visibility="collapsed")
     if view == VIEWS[1]:
@@ -403,6 +417,7 @@ def render():
     today_card(link_to_plan=False)
     _copy_offer(k, today)
     _cost_line(k, today)
+    _pot_warnings(k, today)
 
     days_col, add_col = st.columns([3, 2], gap="medium")  # on a phone the days come first, the form after
     with days_col:
@@ -470,11 +485,51 @@ def _day_card(k, d, today):
             slot_entries = [e for e in entries if e["slot"] == slot]
             if not slot_entries:
                 continue
-            st.html(f'<div class="meal-slot">{esc(slot)}</div>')
+            _slot_head(k, d, slot, slot_entries, today)
             if len(slot_entries) == 1:
                 _entry_row(k, slot_entries[0], today)
             else:  # several dishes in one meal: one line, one tick
                 _meal_row(k, slot_entries, today)
+
+
+def _set_people(day, slot, key, usual):
+    n = st.session_state.get(key)
+    actions.set_meal_people(day, slot, None if n is None or abs(n - usual) < 1e-9 else n)
+    flash(f"{slot} on {day:%a %d}: {people_text(n if n is not None else usual)}", ":material/group:")
+
+
+def _slot_head(k, d, slot, entries, today):
+    """"Lunch · 1 person", with a way to change it for this day only (guests, someone away)."""
+    n = k.meal_people(d, slot)
+    usual = float(k.slot_people.get(slot, k.household))
+    own = any(e.get("people") for e in entries)
+    head = f"{slot} · {people_text(n)}" + (" (not the usual)" if own else "")
+    if d < today or all(e["status"] != OPEN for e in entries):
+        st.html(f'<div class="meal-slot">{esc(head)}</div>')
+        return
+    row = st.container(horizontal=True, vertical_alignment="center", key=f"meal-slot-{d:%Y%m%d}-{slot}")
+    row.html(f'<div class="meal-slot">{esc(head)}</div>', width="stretch")
+    with row.popover("", icon=":material/group:", help="How many are eating this meal"):
+        key = f"meal_people_{d:%Y%m%d}_{slot}"
+        st.number_input("People eating", min_value=0.0, max_value=50.0, step=1.0, format="%g", value=n, key=key,
+                        on_change=_set_people, args=(d, slot, key, usual),
+                        help=f"Usually {frac(usual)}. Changes what's cooked, eaten and kept for this meal only.")
+
+
+def _smaller_pot(entry_id, qty, name):
+    actions.set_plan_qty(entry_id, qty)
+    flash(f"{name}: now {frac(qty)} {plural('portion', qty)}", ":material/soup_kitchen:")
+
+
+def _pot_warnings(k, today):
+    """Pots in the plan that make more than gets eaten before they go off, each with a one-tap smaller pot."""
+    for p in k.pot_warnings(today):
+        with st.container(key=f"meal-pot-{p['entry_id']}"):
+            field_msg(p["text"], "warn")
+            st.button(f"Cook {frac(p['suggest'])} instead", key=f"meal_pot_fix_{p['entry_id']}", type="tertiary",
+                      icon=":material/soup_kitchen:", on_click=_smaller_pot,
+                      args=(p["entry_id"], p["suggest"], p["name"]),
+                      help="Plans a smaller pot. Or add more meals of it that week to use it up.")
 
 
 def _cost_line(k, today):

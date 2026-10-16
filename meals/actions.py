@@ -9,7 +9,7 @@ import streamlit as st
 
 from core.db import invalidate, transact
 from meals.data import HOUSEHOLD_KEY, invalidate_kitchen
-from meals.logic import OPEN, entry_needs, price_changes, take_portions
+from meals.logic import OPEN, eaters, entry_needs, price_changes, take_portions
 from meals.units import fmt, make_pack, to_base
 
 
@@ -60,14 +60,16 @@ def _recipe(cur, recipe_id):
 
 
 def _entry(cur, entry_id):
-    cur.execute("SELECT id, day, slot, recipe_id, ingredient_id, qty, unit, status, undo, label, price FROM meals.plan "
-                "WHERE id = %s FOR UPDATE", (entry_id,))
+    cur.execute("SELECT id, day, slot, recipe_id, ingredient_id, qty, unit, status, undo, label, price, people "
+                "FROM meals.plan WHERE id = %s FOR UPDATE", (entry_id,))
     row = cur.fetchone()
     if not row:
         return None
-    keys = ["id", "day", "slot", "recipe_id", "ingredient_id", "qty", "unit", "status", "undo", "label", "price"]
+    keys = ["id", "day", "slot", "recipe_id", "ingredient_id", "qty", "unit", "status", "undo", "label", "price",
+            "people"]
     e = dict(zip(keys, row))
     e["qty"] = float(e["qty"])
+    e["people"] = float(e["people"]) if e["people"] is not None else None
     return e
 
 
@@ -91,7 +93,7 @@ def _cook(cur, e, household, packs):
         removed.append([ing, base, took])
         if q - took > 1e-6:
             short.append((ing, base, q - took))
-    left = max(e["qty"] - min(float(household), e["qty"]), 0.0)
+    left = max(e["qty"] - min(eaters(e, household), e["qty"]), 0.0)
     made = None
     # leftovers are dated from the meal, not from when it was ticked: a pot cooked last week and ticked today
     # isn't fresh. If it would already be past its eat-by date, nothing goes into the fridge.
@@ -112,7 +114,7 @@ def _cook(cur, e, household, packs):
 def _eat_leftovers(cur, e, household):
     """Portions come off the leftovers that go off soonest. Food past its eat-by date is never eaten from
     here: it's for the bin (and the waste log), not the plate. Returns portions that weren't there."""
-    wanted = min(float(household), e["qty"])
+    wanted = min(eaters(e, household), e["qty"])
     cur.execute("SELECT id, portions, eat_by FROM meals.fridge WHERE recipe_id = %s AND portions > 0 "
                 "AND eat_by >= CURRENT_DATE FOR UPDATE", (e["recipe_id"],))
     batches = [{"id": i, "portions": float(p), "eat_by": by} for i, p, by in cur.fetchall()]
@@ -186,7 +188,7 @@ def mark_meal(entry_ids, household):
                     continue
                 if e["recipe_id"]:
                     name = _recipe(cur, e["recipe_id"])[0]["name"]
-                    want = min(float(household), e["qty"])
+                    want = min(eaters(e, household), e["qty"])
                     cur.execute("SELECT COALESCE(SUM(portions), 0) FROM meals.fridge WHERE recipe_id = %s "
                                 "AND portions > 0 AND eat_by >= CURRENT_DATE", (e["recipe_id"],))
                     if float(cur.fetchone()[0]) >= want - 1e-9:
@@ -301,24 +303,26 @@ def untick(entry_id):
 
 
 # ---- the plan ---------------------------------------------------------------------------------
-def add_to_plan(day, slot, recipe_id=None, ingredient_id=None, qty=1, unit=None, label=None, price=None):
+def add_to_plan(day, slot, recipe_id=None, ingredient_id=None, qty=1, unit=None, label=None, price=None,
+                people=None):
     def work(conn):
         with conn.cursor() as cur:
-            cur.execute("INSERT INTO meals.plan (day, slot, recipe_id, ingredient_id, qty, unit, label, price) "
-                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-                        (day, slot, recipe_id, ingredient_id, qty, unit, label, price))
+            cur.execute("INSERT INTO meals.plan (day, slot, recipe_id, ingredient_id, qty, unit, label, price, people) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                        (day, slot, recipe_id, ingredient_id, qty, unit, label, price, people))
     _run(work)
 
 
 def add_many(entries):
-    """Add several plan entries at once (dicts with day, slot, recipe_id, ingredient_id, qty, unit)."""
+    """Add several plan entries at once (dicts with day, slot, recipe_id, ingredient_id, qty, unit, and optionally
+    label, price, people)."""
     def work(conn):
         with conn.cursor() as cur:
             for e in entries:
-                cur.execute("INSERT INTO meals.plan (day, slot, recipe_id, ingredient_id, qty, unit, label, price) "
-                            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                cur.execute("INSERT INTO meals.plan (day, slot, recipe_id, ingredient_id, qty, unit, label, price, people) "
+                            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
                             (e["day"], e["slot"], e.get("recipe_id"), e.get("ingredient_id"), e["qty"], e.get("unit"),
-                             e.get("label"), e.get("price")))
+                             e.get("label"), e.get("price"), e.get("people")))
         return len(entries)
     return _run(work)
 
@@ -335,6 +339,35 @@ def remove_from_plan(entry_id):
                     _reverse(cur, e)  # removing a ticked meal puts its ingredients and portions back
                 cur.execute("DELETE FROM meals.plan WHERE id = %s", (i,))
     _run(work, money=True)
+
+
+def set_plan_qty(entry_id, qty):
+    """Change how much of a dish is planned (e.g. a smaller pot), while it hasn't been cooked yet."""
+    def work(conn):
+        with conn.cursor() as cur:
+            cur.execute("UPDATE meals.plan SET qty = %s WHERE id = %s AND status = %s", (float(qty), entry_id, OPEN))
+    _run(work)
+
+
+def set_meal_people(day, slot, people):
+    """How many eat one day's breakfast, lunch or supper; None goes back to the usual number for that meal.
+    Every dish of the meal gets the same number, so they're eaten (and leftovers kept) together."""
+    def work(conn):
+        with conn.cursor() as cur:
+            cur.execute("UPDATE meals.plan SET people = %s WHERE day = %s AND slot = %s", (people, day, slot))
+    _run(work)
+
+
+def set_slot_people(counts):
+    """The usual number of people at each meal: {slot: number}."""
+    from meals.data import slot_key
+
+    def work(conn):
+        with conn.cursor() as cur:
+            for slot, n in counts.items():
+                cur.execute("INSERT INTO app_meta (key, value) VALUES (%s, %s) ON CONFLICT (key) DO UPDATE SET value = "
+                            "EXCLUDED.value", (slot_key(slot), str(int(n))))
+    _run(work)
 
 
 def set_household(n):

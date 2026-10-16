@@ -937,13 +937,17 @@ def test_deleting_an_item_keeps_old_meals(conn):
 
 
 # ---- everyday money vs savings ----------------------------------------------------------------------------
-def _book_with(everyday, savings, budget_left):
-    """A stand-in book: one everyday account, one savings account, and this month's budgets."""
+def _book_with(everyday, savings, budget_left, committed=0.0, committed_budget=0.0):
+    """A stand-in book: one everyday account, one savings account, this month's budgets, and auto payments still
+    due this month (committed: out of the everyday account; committed_budget: auto bills under the budgets)."""
     from types import SimpleNamespace
     accounts = {"GCB": everyday, **({} if savings is None else {"Susu": savings})}  # None: no savings account
+    items = [{"name": "Monthly Susu", "date": date.today(), "amount": committed}] if committed else []
     fake = SimpleNamespace(everyday_accounts=["GCB"], balances=lambda: pd.Series(accounts, dtype=float),
                            budget_total=lambda period: None if budget_left is None else
-                           {"limit": 1000.0, "spent": 1000.0 - budget_left, "left": budget_left})
+                           {"limit": 1000.0, "spent": 1000.0 - budget_left, "left": budget_left},
+                           committed=lambda today=None: {"cash": committed, "budget": committed_budget,
+                                                         "items": items})
     fake.spending_power = lambda today=None: Book.spending_power(fake, today)
     return fake
 

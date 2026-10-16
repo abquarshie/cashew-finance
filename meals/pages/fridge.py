@@ -6,7 +6,7 @@ import streamlit as st
 from core.data import money
 from meals import actions
 from meals.data import kitchen
-from meals.logic import fridge_flags, recipe_cost
+from meals.logic import SLOTS, fridge_flags, recipe_cost
 from meals.units import LEFTOVER_UNITS, base_of, fmt, fmt_stock, frac, from_base, loose, plural, to_base
 from ui.components import card, empty, esc, field_msg, flash, page_header, pill, section
 
@@ -151,9 +151,18 @@ def render():
     with tab_s:
         with card("meal-settings"):
             section("People eating at each meal")
-            n = st.number_input("People", 1, 30, k.household, key="meal_household", label_visibility="collapsed")
-            st.caption("When a dish is cooked, this many portions are eaten at that meal and the rest go into the fridge.")
-            if n != k.household and st.button("Save", type="primary", key="meal_household_save"):
-                actions.set_household(n)
-                flash(f"Set to {n} people per meal")
+            st.caption("When a dish is cooked, this many portions are eaten at that meal and the rest go into the "
+                       "fridge. If lunch is usually eaten at work or school, set it lower. A single day can be "
+                       "different: change it on the meal plan.")
+            cols = st.columns(len(SLOTS))
+            counts = {slot: col.number_input(slot, 0, 30, int(k.slot_people[slot]), key=f"meal_people_usual_{slot}")
+                      for slot, col in zip(SLOTS, cols)}
+            n = st.number_input("People in the household", 1, 30, k.household, key="meal_household",
+                                help="Used for food cost a person a day in the monthly report.")
+            changed = counts != {s: int(v) for s, v in k.slot_people.items()} or n != k.household
+            if changed and st.button("Save", type="primary", key="meal_household_save"):
+                if n != k.household:
+                    actions.set_household(n)
+                actions.set_slot_people(counts)
+                flash("Saved: " + ", ".join(f"{v} at {s.lower()}" for s, v in counts.items()))
                 st.rerun()

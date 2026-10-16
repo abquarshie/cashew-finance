@@ -10,11 +10,21 @@ import pandas as pd
 import streamlit as st
 
 from core.db import transact
-from meals.logic import OPEN, ROLE_ORDER, allocate, reminders
+from meals.logic import OPEN, ROLE_ORDER, SLOTS, allocate, eaters, pot_waste, reminders, suggested_pot
 from meals.units import base_of, fmt, fmt_stock, make_pack, plural
 
 TTL = int(os.environ.get("CASHEW_CACHE_SECONDS", "60"))  # tests shorten this
 HOUSEHOLD_KEY = "meals_household"
+
+
+def slot_key(slot):
+    """Where the usual number of people for a breakfast, lunch or supper is kept (app_meta)."""
+    return f"meals_people_{slot.lower()}"
+
+
+def fmt_portions(n):
+    from meals.units import frac, plural
+    return f"{frac(n)} {plural('portion', n)}"
 
 # Every table the kitchen screens need, as (columns, query). They all come back in ONE round trip (as JSON),
 # instead of one trip per table: on a distant database each trip costs ~0.1-0.2 s.
@@ -34,9 +44,9 @@ QUERIES = {
                       "SELECT id, pairing_id, recipe_id, ingredient_id, qty, unit FROM meals.pairing_items ORDER BY id"),
     # a window around this week is all the screens need
     "plan": (["id", "day", "slot", "recipe_id", "ingredient_id", "qty", "unit", "status", "done_at", "done_by", "label",
-              "price", "short"],
+              "price", "short", "people"],
              "SELECT id, day, slot, recipe_id, ingredient_id, qty, unit, status, done_at, done_by, label, price, "
-             "undo->'short' AS short "  # what the pantry didn't have when it was ticked
+             "undo->'short' AS short, people "  # short: what the pantry didn't have when it was ticked
              "FROM meals.plan WHERE day BETWEEN CURRENT_DATE - 40 AND CURRENT_DATE + 63 ORDER BY day, id"),
     "fridge": (["id", "recipe_id", "label", "portions", "cooked_on", "eat_by", "plan_id", "unit"],
                "SELECT id, recipe_id, label, portions, cooked_on, eat_by, plan_id, unit FROM meals.fridge "
@@ -163,7 +173,8 @@ class Kitchen:
              "ingredient_id": None if pd.isna(r["ingredient_id"]) else int(r["ingredient_id"]),
              "qty": float(r["qty"]), "unit": r["unit"], "status": r["status"], "done_by": r["done_by"],
              "label": r["label"], "price": _f(r["price"]),
-             "short": r["short"] if isinstance(r.get("short"), list) else []}
+             "short": r["short"] if isinstance(r.get("short"), list) else [],
+             "people": _f(r.get("people"))}  # None: the usual number for that meal
             for r in f["plan"].to_dict("records")]
         self.plan.sort(key=lambda e: (e["day"], e["id"]))
         self._by_day = defaultdict(list)  # day -> its entries, so each day card doesn't scan the whole plan
@@ -192,6 +203,13 @@ class Kitchen:
             self.household = max(int(settings.get(HOUSEHOLD_KEY, 4)), 1)
         except ValueError:
             self.household = 4
+        # the usual number eating each meal (lunch is often eaten at work or school); the household size otherwise
+        self.slot_people = {}
+        for slot in SLOTS:
+            try:
+                self.slot_people[slot] = max(int(settings.get(slot_key(slot), self.household)), 0)
+            except ValueError:
+                self.slot_people[slot] = self.household
         self.fun = settings.get("feature_fun", "on") != "off"  # jokes in the reminders
         self._alloc = {}
 
@@ -209,11 +227,39 @@ class Kitchen:
         if today not in self._alloc:
             start, end = self.window(today)
             self._alloc[today] = allocate(self.open_entries(start, end), self.recipes, self.items, self.pantry,
-                                          self.fridge, self.household, today, self.packs)
+                                          self.fridge, self.slot_people, today, self.packs)
         return self._alloc[today]
 
     def meal_status(self, entry_id, today=None):
         return self.allocation(today)["meals"].get(entry_id)
+
+    # ---- people per meal --------------------------------------------------------------------------
+    def people(self, e):
+        """How many eat this planned dish: the number set on the meal, or the usual for its slot."""
+        return eaters(e, self.slot_people)
+
+    def meal_people(self, day, slot):
+        """How many eat this day's breakfast, lunch or supper (the number set on it, or the usual)."""
+        parts = [x for x in self._by_day.get(day, []) if x["slot"] == slot and x.get("people")]
+        return float(parts[0]["people"]) if parts else float(self.slot_people.get(slot, self.household))
+
+    # ---- pots that will partly go off ------------------------------------------------------------
+    def pot_warnings(self, today=None):
+        """Planned pots that make more than the plan eats before they go off:
+        [{"entry_id", "recipe_id", "name", "day", "slot", "cooked", "eaten", "left", "eat_by", "suggest", "text"}]."""
+        today = today or date.today()
+        _, end = self.window(today)
+        out = []
+        for p in pot_waste(self.allocation(today), end):
+            name = self.recipes.get(p["recipe_id"], {}).get("name", "?")
+            n = suggested_pot(p)
+            p.update(name=name, suggest=n, text=(
+                f"{name} on {p['day']:%a %d}: {fmt_portions(p['cooked'])} cooked, but only "
+                f"{fmt_portions(p['eaten'])} eaten before it goes off on {p['eat_by']:%a %d}, so "
+                f"{fmt_portions(p['left'])} would be thrown away. Cook {fmt_portions(n)}, or plan it for more meals "
+                "that week."))
+            out.append(p)
+        return out
 
     # ---- ingredients that ran out while cooking ------------------------------------------------
     RAN_SHORT_DAYS = 7
@@ -269,15 +315,22 @@ class Kitchen:
                                       "the recipe.", "ran_short"))
         return notes
 
+    def _extra_notes(self, today):
+        """Reminders worked out here rather than in logic.reminders(): what ran out while cooking, and pots
+        cooked today or tomorrow that are bigger than the plan eats (still time to cook less)."""
+        soon = [("warn", p["text"], "pot_waste") for p in self.pot_warnings(today)
+                if p["day"] <= today + timedelta(days=1)]
+        return self._ran_short_notes(today) + soon
+
     def notes(self, now=None):
         """Today's and tomorrow's reminders, with jokes if they're switched on."""
         now = now or datetime.now()
         today = now.date()
         food_low = {key: v for key, v in self.low_levels.items() if key[0] not in self.supplies}
         out = reminders(now, self.entries(today, today + timedelta(days=1)), self.recipes, self.items, self.pantry,
-                        self.fridge, self.names, self.household, packs=self.packs, alloc=self.allocation(today),
+                        self.fridge, self.names, self.slot_people, packs=self.packs, alloc=self.allocation(today),
                         fun=self.fun, low_levels=food_low, usual=self.unit_of)
-        return [(tone, text) for tone, text, _ in self._ran_short_notes(today)] + out
+        return [(tone, text) for tone, text, _ in self._extra_notes(today)] + out
 
     def urgent(self, now=None):
         """The reminders worth a line in the morning message: prep to start (soak the beans), and fridge food
@@ -286,9 +339,9 @@ class Kitchen:
         today = now.date()
         food_low = {key: v for key, v in self.low_levels.items() if key[0] not in self.supplies}
         notes = reminders(now, self.entries(today, today + timedelta(days=1)), self.recipes, self.items, self.pantry,
-                          self.fridge, self.names, self.household, packs=self.packs, alloc=self.allocation(today),
+                          self.fridge, self.names, self.slot_people, packs=self.packs, alloc=self.allocation(today),
                           fun=False, low_levels=food_low, usual=self.unit_of, with_kind=True)
-        return ([text for _, text, _ in self._ran_short_notes(today)]
+        return ([text for _, text, _ in self._extra_notes(today)]
                 + [text for _, text, kind in notes if kind in ("prep", "past", "eat_soon")])
 
     def stocktake(self, today=None, days=7, most=10):

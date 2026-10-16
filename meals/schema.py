@@ -230,11 +230,17 @@ TABLES += [
     "CREATE INDEX IF NOT EXISTS trip_items_trip_idx ON meals.trip_items (trip_id)",
     "CREATE INDEX IF NOT EXISTS plan_recipe_idx ON meals.plan (recipe_id)",
 ]
+
+TABLES += [
+    # how many people eat this meal, when it isn't the usual number for that breakfast, lunch or supper
+    # (empty: the usual number, set under Meals → Fridge → Settings)
+    "ALTER TABLE meals.plan ADD COLUMN IF NOT EXISTS people NUMERIC(5, 1)",
+]
 # amounts, prices and stock are never negative (see never_negative)
 TABLES += (never_negative("meals.ingredients", "pack_size", "low_level")
            + never_negative("meals.recipes", "portions", "price", "keeps_days", "prep_hours")
            + never_negative("meals.recipe_items", "qty") + never_negative("meals.pairing_items", "qty")
-           + never_negative("meals.plan", "qty", "price") + never_negative("meals.pantry", "qty")
+           + never_negative("meals.plan", "qty", "price", "people") + never_negative("meals.pantry", "qty")
            + never_negative("meals.prices", "per_unit") + never_negative("meals.fridge", "portions")
            + never_negative("meals.trips", "total") + never_negative("meals.trip_items", "qty", "price")
            + never_negative("meals.waste", "amount", "value") + never_negative("meals.bought", "qty", "paid"))

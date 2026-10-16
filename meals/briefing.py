@@ -170,13 +170,21 @@ def money_lines(book, today):
                  "• Total Budget Left for the Month: GH₵0.00 (nothing to spend until money comes in)"]
     elif state == "empty":
         lines = ["• Total Budget Left for the Month: GH₵0.00 (everyday money is used up)"]
+    elif state == "committed":
+        short = f", {cedi(-p['free'])} short" if p["free"] < 0 else ""
+        lines = [f"• Total Budget Left for the Month: GH₵0.00 (auto payments still due this month take all the "
+                 f"everyday money{short})"]
     elif state == "no_budget":
-        lines = [f"• Everyday money: {cedi(p['everyday'])} (no monthly budgets set)"]
+        lines = [f"• Everyday money: {cedi(p['left'])} (no monthly budgets set)"]
     elif state == "capped":
+        hold = "will hold after auto payments" if p.get("committed") else "hold"
         lines = [f"• Total Budget Left for the Month: {cedi(p['left'])} "
-                 f"(budgets allow {cedi(p['budget']['left'])}, but that's all the everyday accounts hold)"]
+                 f"(budgets allow {cedi(p['budget']['left'])}, but that's all the everyday accounts {hold})"]
     else:  # ok, or over_budget (a negative figure)
         lines = [f"• Total Budget Left for the Month: {cedi(p['left'])}"]
+    if p.get("committed") and state != "debt":  # already spoken for: the Susu transfer, data bundles…
+        names = ", ".join(dict.fromkeys(i["name"] for i in p["committed_items"]))
+        lines.append(f"• Set aside for auto payments still due this month: {cedi(p['committed'])} ({names})")
     if p["has_savings"]:
         lines.append(f"• Savings (kept separate, not counted): {cedi(p['savings'])}")
     return lines

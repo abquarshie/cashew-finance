@@ -125,6 +125,12 @@ div[class*="st-key-meal-mk-"] [data-testid="stCheckbox"] label p { font-size: 1r
 .meal-slot { color: var(--muted); font-size: .74rem; font-weight: 700; margin: .55rem 0 -.2rem; }
 .meal-parts { color: var(--muted); font-size: .76rem; line-height: 1.4; margin: -.35rem 0 .2rem 1.85rem; }
 div[class*="st-key-meal-combo-"] { gap: .25rem !important; padding: .15rem 0; }
+/* a meal's heading ("Lunch · 1 person") with a small button to change who's eating */
+div[class*="st-key-meal-slot-"] { gap: .25rem !important; margin: .45rem 0 -.35rem; }
+div[class*="st-key-meal-slot-"] .meal-slot { margin: 0; }
+div[class*="st-key-meal-slot-"] button { min-height: 1.75rem; padding: .1rem .45rem; border-radius: 999px; }
+div[class*="st-key-meal-pot-"] { margin: -.2rem 0 .3rem; }
+div[class*="st-key-meal-pot-"] .field-msg { margin: 0; }
 div[class*="st-key-meal-entry-"] { gap: .25rem !important; border-bottom: 1px solid var(--line); padding: .15rem 0; }
 div[class*="st-key-meal-entry-"]:last-child { border-bottom: none; }
 div[class*="st-key-meal-fr-"] { border-bottom: 1px solid var(--line); padding: .45rem 0; gap: .5rem !important; }

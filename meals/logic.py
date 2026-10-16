@@ -20,6 +20,16 @@ MEAL_HOUR = {"Breakfast": 7, "Lunch": 13, "Supper": 19}
 OPEN = "planned"
 
 
+def eaters(entry, household):
+    """How many people eat this meal: the number set on the meal itself, otherwise the usual number for its
+    breakfast, lunch or supper. household is a plain number, or {slot: number}."""
+    if entry.get("people"):
+        return float(entry["people"])
+    if isinstance(household, dict):
+        return float(household.get(entry.get("slot"), max(household.values(), default=1)))
+    return float(household)
+
+
 def is_bought(entry, recipes):
     """Food bought ready-made (kenkey, waakye…): a bought dish, or a one-off typed into the plan."""
     if entry.get("recipe_id"):
@@ -153,23 +163,28 @@ def allocate(entries, recipes, items, pantry, fridge, household, today, packs=No
     Cooking more portions than are eaten puts the rest in the fridge, where a later meal of the same
     dish can use them before they go off.
 
-    entries: plan entries; only open ones from today on are counted.
+    entries: plan entries; only open ones from today on are counted. household: people eating, as a number or
+    {slot: number}; a meal's own "people" wins (see eaters()).
     Returns {"meals": {entry_id: {"status": "ready" | "leftovers" | "short",
                                   "missing": [(ingredient_id, base, qty)], "needs": [(ing, base, qty)]}},
-             "stock_after": pantry left once every meal has taken its share}.
+             "stock_after": pantry left once every meal has taken its share,
+             "pots": {entry_id: {"recipe_id", "cooked", "eaten", "left", "eat_by"}} for each planned cooking
+                     that makes leftovers: how much of it later meals eat before its eat-by date}.
     """
     stock = {k: float(v) for k, v in pantry.items()}
-    boxes = [[b["recipe_id"], float(b["portions"]), b["eat_by"]] for b in fridge
+    # each box of leftovers: [recipe_id, portions left, eat_by, the plan entry that cooked it (None: in the fridge)]
+    boxes = [[b["recipe_id"], float(b["portions"]), b["eat_by"], None] for b in fridge
              if b.get("recipe_id") and float(b["portions"]) > 0]
-    meals = {}
+    meals, pots = {}, {}
     for e in sorted((e for e in entries if e["status"] == OPEN and e["day"] >= today), key=_when):
         rid = e.get("recipe_id")
         recipe = recipes.get(rid) if rid else None
         if is_bought(e, recipes):
             meals[_key(e)] = {"status": "bought", "missing": [], "needs": []}
             continue
+        people = eaters(e, household)
         if recipe:
-            eat = min(float(household), float(e["qty"]))
+            eat = min(people, float(e["qty"]))
             ready = sorted((b for b in boxes if b[0] == rid and b[1] > 1e-9 and b[2] >= e["day"]), key=lambda b: b[2])
             if eat > 0 and sum(b[1] for b in ready) >= eat - 1e-9:
                 left = eat
@@ -177,6 +192,8 @@ def allocate(entries, recipes, items, pantry, fridge, household, today, packs=No
                     t = min(b[1], left)
                     b[1] -= t
                     left -= t
+                    if b[3] is not None:
+                        pots[b[3]]["eaten"] += t
                 meals[_key(e)] = {"status": "leftovers", "missing": [], "needs": []}
                 continue
         needs = entry_needs(e, recipes, items, packs)
@@ -188,11 +205,33 @@ def allocate(entries, recipes, items, pantry, fridge, household, today, packs=No
             if q - used > 1e-6:
                 missing.append((ing, base, q - used))
         if recipe:
-            extra = float(e["qty"]) - min(float(household), float(e["qty"]))
+            eaten_now = min(people, float(e["qty"]))
+            extra = float(e["qty"]) - eaten_now
             if extra > 1e-9:
-                boxes.append([rid, extra, e["day"] + timedelta(days=int(recipe.get("keeps_days") or 3))])
+                eat_by = e["day"] + timedelta(days=int(recipe.get("keeps_days") or 3))
+                boxes.append([rid, extra, eat_by, _key(e)])
+                pots[_key(e)] = {"recipe_id": rid, "day": e["day"], "slot": e["slot"], "cooked": float(e["qty"]),
+                                 "eaten": eaten_now, "eat_by": eat_by}
         meals[_key(e)] = {"status": "short" if missing else "ready", "missing": missing, "needs": needs}
-    return {"meals": meals, "stock_after": stock}
+    for p in pots.values():
+        p["left"] = round(p["cooked"] - p["eaten"], 3)
+    return {"meals": meals, "stock_after": stock, "pots": pots}
+
+
+def pot_waste(alloc, until, at_least=1.0):
+    """Planned pots that will partly go off: more portions cooked than the plan eats before the eat-by date.
+    Only pots whose eat-by date falls by `until` (the end of the planned window) are judged, since a later meal
+    could still be planned for the others. Returns [pot dicts from allocate(), with "left" >= at_least],
+    soonest first."""
+    out = [dict(p, entry_id=k) for k, p in alloc.get("pots", {}).items()
+           if p["eat_by"] <= until and p["left"] >= at_least - 1e-9]
+    return sorted(out, key=lambda p: (p["day"], MEAL_HOUR.get(p["slot"], 12)))
+
+
+def suggested_pot(pot):
+    """How many portions to cook so nothing goes off: what's eaten before the eat-by date, to the half."""
+    import math
+    return max(math.ceil(pot["eaten"] * 2 - 1e-9) / 2, 0.5)
 
 
 def repeat_plan(plan, today, horizon=14):
@@ -214,7 +253,8 @@ def repeat_plan(plan, today, horizon=14):
             src = by_slot.get((d - timedelta(days=7), slot))
             if src:
                 copies = [{"day": d, "slot": slot, "recipe_id": e.get("recipe_id"), "ingredient_id": e.get("ingredient_id"),
-                           "qty": e["qty"], "unit": e.get("unit"), "label": e.get("label"), "price": e.get("price")}
+                           "qty": e["qty"], "unit": e.get("unit"), "label": e.get("label"), "price": e.get("price"),
+                           "people": e.get("people")}
                           for e in src]
                 by_slot[(d, slot)] = copies
                 new += copies
@@ -529,7 +569,8 @@ def reminders(now, entries, recipes, items, pantry, fridge, names, household, lo
 def from_leftovers(entries, recipes, items, pantry, fridge, household, today, day, slot, recipe_id, packs=None):
     """Would a dish planned on this day and meal be eaten from leftovers (the fridge, or a bigger pot cooked
     earlier in the plan)? Used to suggest planning just enough for the people eating, not a whole new pot."""
-    probe = {"id": -1, "day": day, "slot": slot, "recipe_id": recipe_id, "qty": float(household),
+    people = eaters({"slot": slot}, household)
+    probe = {"id": -1, "day": day, "slot": slot, "recipe_id": recipe_id, "qty": people, "people": people,
              "status": OPEN}  # plan ids are positive, so -1 never clashes and still sorts with them
     alloc = allocate(list(entries) + [probe], recipes, items, pantry, fridge, household, today, packs)
     return alloc["meals"].get(-1, {}).get("status") == "leftovers"

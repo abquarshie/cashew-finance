@@ -341,10 +341,14 @@ class Book:
         where state is
           "debt"         everyday accounts are below zero: left is that (negative) balance
           "empty"        everyday accounts are at exactly zero: left is 0
+          "committed"    there's money, but auto payments still due this month will take all of it: left is what's
+                         short (zero or negative)
           "over_budget"  there's money, but this month's budgets are overspent: left is the overspend (negative)
-          "capped"       budgets allow more than the everyday accounts hold: left is what they hold
+          "capped"       budgets allow more than the everyday accounts will hold: left is that
           "ok"           left is what's left of the budgets
           "no_budget"    no budgets set: left is the everyday money
+        "Everyday money" here is what's in the everyday accounts minus the auto payments still due this month
+        ("free"; see committed()), and the budgets left are less any auto bills still to come under them.
         """
         today = today or date.today()
         bal = self.balances()
@@ -353,19 +357,75 @@ class Book:
         savings = round(float(sum(v for n, v in bal.items() if n not in everyday_names)), 2)
         budget = self.budget_total(pd.Period(today, "M"))
         has_savings = any(n not in everyday_names for n in bal.index)
+        # money that auto transactions will take out of the everyday accounts before the month ends is already
+        # spoken for (the Susu transfer on the 19th), and auto bills will use up some of the budgets
+        c = self.committed(today)
+        free = round(everyday - c["cash"], 2)
+        if budget is not None:
+            budget = {**budget, "left": round(budget["left"] - c["budget"], 2), "committed": c["budget"]}
         out = {"everyday": everyday, "savings": savings, "has_savings": has_savings, "debt": max(-everyday, 0.0),
-               "budget": budget}
+               "budget": budget, "committed": c["cash"], "committed_items": c["items"], "free": free}
         if everyday < 0:
             return {**out, "state": "debt", "left": everyday}
         if everyday == 0:
             return {**out, "state": "empty", "left": 0.0}
+        if free <= 0:
+            return {**out, "state": "committed", "left": free}
         if budget is None:
-            return {**out, "state": "no_budget", "left": everyday}
+            return {**out, "state": "no_budget", "left": free}
         if budget["left"] < 0:
             return {**out, "state": "over_budget", "left": budget["left"]}
-        if budget["left"] > everyday:
-            return {**out, "state": "capped", "left": everyday}
+        if budget["left"] > free:
+            return {**out, "state": "capped", "left": free}
         return {**out, "state": "ok", "left": budget["left"]}
+
+    def committed(self, today=None):
+        """Auto transactions still to come this month (not yet added), and what they'll take:
+        {"cash": out of the everyday accounts, "budget": off this month's budgets,
+         "items": [{"name", "date", "amount"}] for each run that takes everyday money}.
+
+        Counted: auto expenses paid from an everyday account, transfers from an everyday account into savings
+        (amount and fee), and the fee on a move between two everyday accounts. Auto income isn't counted:
+        money that hasn't arrived yet can't be spent."""
+        today = today or date.today()
+        out = {"cash": 0.0, "budget": 0.0, "items": []}
+        if not len(self.rules):
+            return out
+        month_end = pd.Period(today, "M").end_time.date()
+        everyday = set(self.everyday_accounts)
+        status = self.budget_status(pd.Period(today, "M"))
+        groups = {s["name"] for s in status if s["is_group"]}
+        cats = {s["name"] for s in status if not s["is_group"]}
+
+        def budgeted(category):  # counts against a budget this month (a group's, or its own)
+            return self.group_of.get(category) in groups or category in cats
+
+        for _, r in self.rules[self.rules["active"]].iterrows():
+            amount = float(r["amount"])
+            fee = float(r["fee"]) if pd.notna(r["fee"]) else 0.0
+            end = r["end_date"] if r["end_date"] is not None and not pd.isna(r["end_date"]) else None
+            n, guard = int(r["run_count"]), 0
+            d = occurrence(r["start_date"], r["frequency"], n)  # the next run not yet added
+            while d <= month_end and (end is None or d <= end) and guard < 60:
+                cash = 0.0
+                out_of, into = r["account"] in everyday, r["to_account"] in everyday
+                if r["type"] == "Expense":
+                    cash = amount if out_of else 0.0
+                    if budgeted(r["category"]):
+                        out["budget"] += amount
+                elif r["type"] == "Transfer":
+                    cash = (amount + fee) if out_of and not into else (fee if out_of else 0.0)
+                    if fee and budgeted(FEE_CATEGORY):
+                        out["budget"] += fee
+                if cash:
+                    out["cash"] += cash
+                    out["items"].append({"name": r["name"], "date": d, "amount": cash})
+                n += 1
+                guard += 1
+                d = occurrence(r["start_date"], r["frequency"], n)
+        out["cash"], out["budget"] = round(out["cash"], 2), round(out["budget"], 2)
+        out["items"].sort(key=lambda i: i["date"])
+        return out
 
     # ---- safe to spend ---------------------------------------------------------
     @cached_property

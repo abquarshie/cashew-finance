@@ -139,11 +139,29 @@ def _budget_tile(b):
     p = b.spending_power()
     month = date.today().strftime("%B")
     state = p["state"]
-    label = {"debt": "Everyday accounts in debt", "no_budget": f"Everyday money · {month}"}.get(
-        state, f"Total budget left · {month}")
-    red = " over" if state in ("debt", "empty", "over_budget") else ""
+    label = {"debt": "Everyday accounts in debt", "no_budget": f"Everyday money · {month}",
+             "committed": "Everyday money · all set aside for auto payments"}.get(state, f"Total budget left · {month}")
+    red = " over" if state in ("debt", "empty", "committed", "over_budget") else ""
     return (f'<div class="hero{red}" data-state="{state}"><div class="hero-label">{label}</div>'
             f'<div class="hero-value">{money(p["left"])}</div></div>')
+
+
+def committed_text(p):
+    """"After GH₵620.00 set aside for auto payments still to come this month: Monthly Susu (Mon 19), Data bundle
+    (Mon 19, Mon 26)." or "" when nothing is due."""
+    if not p.get("committed"):
+        return ""
+    when = {}
+    for i in p["committed_items"]:
+        when.setdefault(i["name"], []).append(f"{i['date']:%a %d}")
+    return (f"After {money(p['committed'])} set aside for auto payments still to come this month: "
+            + ", ".join(f"{name} ({', '.join(days)})" for name, days in when.items()) + ".")
+
+
+def _committed_note(b):
+    text = committed_text(b.spending_power())
+    if text:
+        st.caption(text)
 
 
 def _balances(b):
@@ -178,6 +196,7 @@ def render():
     top_left, top_right = st.columns([1.25, 1], gap="medium")
     with top_left:
         st.html(_budget_tile(b))
+        _committed_note(b)
         _balances(b)
         add_button("home")
     with top_right:
