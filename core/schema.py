@@ -181,6 +181,33 @@ def untangle_names(cur):
             cur.execute(f"UPDATE {table} SET category = %s WHERE category = %s", (new, name))
 
 
+def category_uses(cur, name):
+    """What would carry on using a category after it was deleted: {"auto transactions": 2, "budgets": 1, ...},
+    only the ones that are used. Past transactions aren't counted: they simply keep the name."""
+    cur.execute("SELECT (SELECT count(*) FROM recurring_rules WHERE category = %s), "
+                "(SELECT count(*) FROM budgets WHERE category = %s), "
+                "(SELECT count(*) FROM meals.ingredients WHERE category = %s), "
+                "(SELECT count(*) FROM meals.recipes WHERE category = %s)", (name, name, name, name))
+    counts = cur.fetchone()
+    labels = ("auto transactions", "budgets", "kitchen items", "bought dishes")
+    return {label: int(n) for label, n in zip(labels, counts) if n}
+
+
+def category_delete_statements(name, move_to=None):
+    """Deleting a category: anything that would keep using it (auto transactions, kitchen items, bought dishes)
+    moves to `move_to`, and its budget moves too unless `move_to` already has one, in which case it goes.
+    Past transactions keep the old name. Returns [(sql, params)] to run together."""
+    stmts = []
+    if move_to:
+        stmts += [(f"UPDATE {table} SET category = %s WHERE category = %s", (move_to, name))
+                  for table in ("recurring_rules", "meals.ingredients", "meals.recipes")]
+        stmts.append(("UPDATE budgets SET category = %s WHERE category = %s "
+                      "AND NOT EXISTS (SELECT 1 FROM budgets WHERE category = %s)", (move_to, name, move_to)))
+    stmts += [("DELETE FROM budgets WHERE category = %s", (name,)),
+              ("DELETE FROM categories WHERE name = %s", (name,))]
+    return stmts
+
+
 def ensure_schema(conn):
     """Create or upgrade every table, and add the starting categories and kitchen catalog once.
     Safe to run every time; when the database is already up to date it only reads one value."""

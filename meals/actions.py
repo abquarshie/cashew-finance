@@ -93,14 +93,19 @@ def _cook(cur, e, household, packs):
             short.append((ing, base, q - took))
     left = max(e["qty"] - min(float(household), e["qty"]), 0.0)
     made = None
-    if left > 0:
-        cooked = date.today()
+    # leftovers are dated from the meal, not from when it was ticked: a pot cooked last week and ticked today
+    # isn't fresh. If it would already be past its eat-by date, nothing goes into the fridge.
+    cooked = min(e["day"], date.today())
+    if left > 0 and cooked + timedelta(days=r["keeps_days"]) >= date.today():
         cur.execute("INSERT INTO meals.fridge (recipe_id, label, portions, cooked_on, eat_by, plan_id, created_by) "
                     "VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
                     (e["recipe_id"], r["name"], left, cooked, cooked + timedelta(days=r["keeps_days"]), e["id"], _me()))
         made = [cur.fetchone()[0], left]
+    # what the pantry didn't have is kept with the meal, so the morning message and the shopping list can say
+    # it ran out (stock never goes below zero, so without this the shortfall would be forgotten straight away)
     cur.execute("UPDATE meals.plan SET status = 'cooked', done_at = now(), done_by = %s, undo = %s WHERE id = %s",
-                (_me(), json.dumps({"pantry": removed, "fridge_made": made}), e["id"]))
+                (_me(), json.dumps({"pantry": removed, "fridge_made": made, "short": [list(s) for s in short]}),
+                 e["id"]))
     return short
 
 
@@ -120,11 +125,14 @@ def _eat_leftovers(cur, e, household):
 
 
 def _eaten(cur, e, packs):
-    """A plain item (fruit, bread, gari) comes out of the pantry."""
+    """A plain item (fruit, bread, gari) comes out of the pantry. Returns what wasn't there, as _cook does."""
     q, base = to_base(e["qty"], e["unit"] or "pcs", packs.get(e["ingredient_id"]))
     took = _take_stock(cur, e["ingredient_id"], base, q)
+    short = [(e["ingredient_id"], base, q - took)] if q - took > 1e-6 else []
     cur.execute("UPDATE meals.plan SET status = 'done', done_at = now(), done_by = %s, undo = %s WHERE id = %s",
-                (_me(), json.dumps({"pantry": [[e["ingredient_id"], base, took]]}), e["id"]))
+                (_me(), json.dumps({"pantry": [[e["ingredient_id"], base, took]], "short": [list(s) for s in short]}),
+                 e["id"]))
+    return short
 
 
 def mark_cooked(entry_id, household):
@@ -151,14 +159,14 @@ def mark_from_fridge(entry_id, household):
 
 
 def mark_done(entry_id):
-    """A plain item (fruit, bread, a snack) was eaten: it comes out of the pantry."""
+    """A plain item (fruit, bread, a snack) was eaten: it comes out of the pantry. Returns what wasn't there."""
     def work(conn):
         with conn.cursor() as cur:
             e = _entry(cur, entry_id)
             if not e or e["status"] != OPEN or not e["ingredient_id"]:
-                return
-            _eaten(cur, e, _packs(cur))
-    _run(work)
+                return []
+            return _eaten(cur, e, _packs(cur))
+    return _run(work)
 
 
 def mark_meal(entry_ids, household):
@@ -188,7 +196,7 @@ def mark_meal(entry_ids, household):
                         out["short"] += _cook(cur, e, household, packs)
                         out["cooked"].append(name)
                 elif e["ingredient_id"]:
-                    _eaten(cur, e, packs)
+                    out["short"] += _eaten(cur, e, packs)
                     out["eaten"].append(e["ingredient_id"])
         return out
     return _run(work)

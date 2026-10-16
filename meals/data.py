@@ -11,7 +11,7 @@ import streamlit as st
 
 from core.db import transact
 from meals.logic import OPEN, ROLE_ORDER, allocate, reminders
-from meals.units import base_of, fmt_stock, make_pack
+from meals.units import base_of, fmt, fmt_stock, make_pack, plural
 
 TTL = int(os.environ.get("CASHEW_CACHE_SECONDS", "60"))  # tests shorten this
 HOUSEHOLD_KEY = "meals_household"
@@ -34,8 +34,9 @@ QUERIES = {
                       "SELECT id, pairing_id, recipe_id, ingredient_id, qty, unit FROM meals.pairing_items ORDER BY id"),
     # a window around this week is all the screens need
     "plan": (["id", "day", "slot", "recipe_id", "ingredient_id", "qty", "unit", "status", "done_at", "done_by", "label",
-              "price"],
-             "SELECT id, day, slot, recipe_id, ingredient_id, qty, unit, status, done_at, done_by, label, price "
+              "price", "short"],
+             "SELECT id, day, slot, recipe_id, ingredient_id, qty, unit, status, done_at, done_by, label, price, "
+             "undo->'short' AS short "  # what the pantry didn't have when it was ticked
              "FROM meals.plan WHERE day BETWEEN CURRENT_DATE - 40 AND CURRENT_DATE + 63 ORDER BY day, id"),
     "fridge": (["id", "recipe_id", "label", "portions", "cooked_on", "eat_by", "plan_id", "unit"],
                "SELECT id, recipe_id, label, portions, cooked_on, eat_by, plan_id, unit FROM meals.fridge "
@@ -161,7 +162,8 @@ class Kitchen:
              "recipe_id": None if pd.isna(r["recipe_id"]) else int(r["recipe_id"]),
              "ingredient_id": None if pd.isna(r["ingredient_id"]) else int(r["ingredient_id"]),
              "qty": float(r["qty"]), "unit": r["unit"], "status": r["status"], "done_by": r["done_by"],
-             "label": r["label"], "price": _f(r["price"])}
+             "label": r["label"], "price": _f(r["price"]),
+             "short": r["short"] if isinstance(r.get("short"), list) else []}
             for r in f["plan"].to_dict("records")]
         self.plan.sort(key=lambda e: (e["day"], e["id"]))
         self._by_day = defaultdict(list)  # day -> its entries, so each day card doesn't scan the whole plan
@@ -213,14 +215,69 @@ class Kitchen:
     def meal_status(self, entry_id, today=None):
         return self.allocation(today)["meals"].get(entry_id)
 
+    # ---- ingredients that ran out while cooking ------------------------------------------------
+    RAN_SHORT_DAYS = 7
+
+    def ran_short(self, today=None):
+        """Ingredients a meal needed but the pantry didn't have when it was ticked as cooked or eaten, in the
+        last week, and still not restocked: {(ingredient_id, base): {"qty", "short", "for": [meals],
+        "mismatch": the unit the pantry counts it in, when that's why it couldn't be taken off}}.
+
+        Stock never goes below zero, so this is how a shortfall stays visible: it's a reminder in the morning
+        message and on the plan, and a line on the shopping list, until enough is bought or the pantry is
+        corrected."""
+        today = today or date.today()
+        out = {}
+        for e in self.entries(today - timedelta(days=self.RAN_SHORT_DAYS), today):
+            if e["status"] == OPEN:
+                continue
+            for ing, base, q in e.get("short") or []:
+                ing, q = int(ing), float(q)
+                if ing in self.supplies or ing not in self.names:
+                    continue
+                if float(self.pantry.get((ing, base), 0.0)) >= q - 1e-9:
+                    continue  # bought since, or the pantry was corrected
+                t = out.setdefault((ing, base), {"qty": 0.0, "short": 0.0, "for": [], "mismatch": None})
+                t["qty"] += q
+                t["short"] += q
+                meal = self.meal_name_of(e)
+                if meal not in t["for"]:
+                    t["for"].append(meal)
+                # stock kept in another unit (cups) than the recipe asks for (grams) can't be taken off
+                other = [b for (i, b), v in self.pantry.items() if i == ing and b != base and v > 0]
+                if other:
+                    t["mismatch"] = other[0]
+        return out
+
+    def _ran_short_notes(self, today):
+        """The reminders for ingredients that ran out while cooking: [(tone, text, kind)]."""
+        short = self.ran_short(today)
+        notes = []
+        plain = [(ing, base, t) for (ing, base), t in short.items() if not t["mismatch"]]
+        if plain:
+            items = ", ".join(f"{fmt(t['short'], base, self.unit_of.get(ing))} {self.names[ing]}".replace(" pcs", "")
+                              for ing, base, t in plain)
+            meals = ", ".join(dict.fromkeys(m for _, _, t in plain for m in t["for"]))
+            notes.append(("warn", f"Ran out while cooking ({meals}): {items} short. Buy more, or correct the "
+                                  "pantry if you still have some.", "ran_short"))
+        for (ing, base), t in short.items():
+            if t["mismatch"]:
+                usual = self.unit_of.get(ing)
+                kept = usual if base_of(usual) == t["mismatch"] else t["mismatch"]
+                notes.append(("warn", f"{self.names[ing]} couldn't be taken off the pantry: the recipe measures it "
+                                      f"in {base}, but the pantry counts it in {plural(kept)}. Change the unit in "
+                                      "the recipe.", "ran_short"))
+        return notes
+
     def notes(self, now=None):
         """Today's and tomorrow's reminders, with jokes if they're switched on."""
         now = now or datetime.now()
         today = now.date()
         food_low = {key: v for key, v in self.low_levels.items() if key[0] not in self.supplies}
-        return reminders(now, self.entries(today, today + timedelta(days=1)), self.recipes, self.items, self.pantry,
-                         self.fridge, self.names, self.household, packs=self.packs, alloc=self.allocation(today),
-                         fun=self.fun, low_levels=food_low, usual=self.unit_of)
+        out = reminders(now, self.entries(today, today + timedelta(days=1)), self.recipes, self.items, self.pantry,
+                        self.fridge, self.names, self.household, packs=self.packs, alloc=self.allocation(today),
+                        fun=self.fun, low_levels=food_low, usual=self.unit_of)
+        return [(tone, text) for tone, text, _ in self._ran_short_notes(today)] + out
 
     def urgent(self, now=None):
         """The reminders worth a line in the morning message: prep to start (soak the beans), and fridge food
@@ -231,7 +288,8 @@ class Kitchen:
         notes = reminders(now, self.entries(today, today + timedelta(days=1)), self.recipes, self.items, self.pantry,
                           self.fridge, self.names, self.household, packs=self.packs, alloc=self.allocation(today),
                           fun=False, low_levels=food_low, usual=self.unit_of, with_kind=True)
-        return [text for _, text, kind in notes if kind in ("prep", "past", "eat_soon")]
+        return ([text for _, text, _ in self._ran_short_notes(today)]
+                + [text for _, text, kind in notes if kind in ("prep", "past", "eat_soon")])
 
     def stocktake(self, today=None, days=7, most=10):
         """The pantry items used most in the last week, to count by hand: [(name, what the pantry says)].

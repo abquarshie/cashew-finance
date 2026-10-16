@@ -46,11 +46,16 @@ def transact(fn, read_only=False):
 
     Hosted databases close connections that sit idle; if the pooled one has gone
     stale, it is thrown away and the work is tried once more on a fresh one.
+
+    A write is only retried when the connection failed before COMMIT was sent. If it fails during the
+    commit, the database may already have saved the work, and running it again would save it twice
+    (a duplicate expense), so the error is raised instead.
     """
     pool = _pool(st.secrets["DATABASE_URL"])
     for attempt in (1, 2):
         conn = _borrow(pool)
         broken = False
+        committing = False
         try:
             if read_only:
                 conn.autocommit = True
@@ -60,11 +65,12 @@ def transact(fn, read_only=False):
                     if not conn.closed:
                         conn.autocommit = False
             result = fn(conn)
+            committing = True
             conn.commit()
             return result
         except _STALE:
             broken = True
-            if attempt == 2:
+            if attempt == 2 or committing:
                 raise
         except Exception:
             try:

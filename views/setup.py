@@ -2,7 +2,8 @@ import pandas as pd
 import streamlit as st
 
 from core.data import CURRENCY, KINDS, book
-from core.db import execute, run_many
+from core.db import execute, run_many, transact
+from core.schema import category_delete_statements, category_uses
 from ui.components import card, confirm, empty, field_msg, flash, page_header, section
 
 
@@ -131,8 +132,20 @@ def _categories(b):
             if used:
                 field_msg(f"{used} past entr{'ies use' if used != 1 else 'y uses'} it. They keep the name, or you can "
                           "move them first with Move past entries.", "hint")
-            if st.button("Delete category", icon=":material/delete:", key="cat_del_btn"):
-                confirm(f"Delete the category **{d_sel}**?", [("DELETE FROM categories WHERE name=%s", (d_sel,))],
+            # things that would keep using it after it's gone: an auto transaction would go on adding entries
+            # under a category that no longer exists, and a budget would track nothing
+            uses = transact(lambda conn: category_uses(conn.cursor(), d_sel), read_only=True)
+            move_to = None
+            if uses:
+                field_msg(f"{d_sel} is still used by " + ", ".join(f"{n} {what}" for what, n in uses.items())
+                          + ". Pick where they go instead.", "warn")
+                same_kind = [c for c in b.category_names(b.kind_of.get(d_sel)) if c != d_sel]
+                move_to = st.selectbox("Move them to", same_kind, index=None, format_func=b.cat_label,
+                                       key=f"cat_del_to_{d_sel}", placeholder="Choose a category")
+            if st.button("Delete category", icon=":material/delete:", key="cat_del_btn",
+                         disabled=bool(uses) and not move_to):
+                moved = f" Its {', '.join(uses)} move to **{move_to}**." if uses else ""
+                confirm(f"Delete the category **{d_sel}**?{moved}", category_delete_statements(d_sel, move_to),
                         f"Deleted '{d_sel}'")
 
         else:
@@ -226,6 +239,7 @@ def _accounts(b):
                         ("UPDATE transactions SET to_account=%s WHERE to_account=%s", (new_name, sel)),
                         ("UPDATE recurring_rules SET account=%s WHERE account=%s", (new_name, sel)),
                         ("UPDATE recurring_rules SET to_account=%s WHERE to_account=%s", (new_name, sel)),
+                        ("UPDATE meals.trips SET account=%s WHERE account=%s", (new_name, sel)),
                     ]
                 run_many(stmts)
                 flash(f"Saved '{new_name}'")

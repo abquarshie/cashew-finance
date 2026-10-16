@@ -18,6 +18,14 @@ SCOPES = ["Next 7 days", "Next 14 days", "Today and tomorrow"]
 VIEWS = ["Market mode", "Table", "Prices"]
 
 
+def ran_out_needs(k, today):
+    """Ingredients that ran out while cooking, in the shape shopping_list() takes. Those that couldn't be taken
+    off only because the recipe's unit doesn't match the pantry are left out: the pantry still has them."""
+    return {key: {"qty": t["short"], "short": t["short"], "for": t["for"],
+                  "reason": "Ran out when cooking " + ", ".join(t["for"])}
+            for key, t in k.ran_short(today).items() if not t["mismatch"]}
+
+
 def _range(scope, today):
     days = {"Next 7 days": 7, "Next 14 days": 14, "Today and tomorrow": 2}.get(scope, 7)
     return today, today + timedelta(days=days - 1)
@@ -266,6 +274,9 @@ def render():
     entries = k.open_entries(start, end)
     # the stock is shared out across all the next two weeks' meals in order, so this list is only what's missing
     needs = shortfall(k.allocation(today), entries, names_for_entry=lambda e: f"{k.meal_name_of(e)} ({e['day']:%a})")
+    # what ran out while cooking goes on the list too, even if no planned meal needs it yet
+    for key, t in ran_out_needs(k, today).items():
+        needs.setdefault(key, t)
     items = shopping_list(needs, k.pantry, k.low_levels, k.prices, k.packs)
     items.sort(key=lambda r: (r["low"], k.names.get(r["ingredient_id"], "").lower()))
     extras = ss.setdefault("meal_extra", [])

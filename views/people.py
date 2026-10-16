@@ -36,13 +36,13 @@ def _my_account(user):
         ready = bool(current and new and again) and not problem and not mismatch
         if st.button("Change password", type="primary", disabled=not ready, key="pw_save", icon=":material/lock_reset:"):
             with st.spinner("Saving…"):
-                err = auth.change_password(user["id"], current, new)
+                err = auth.change_password(user["id"], current, new, keep_token=ss.get("_token"))
             if err:
                 st.error(err)
             else:
                 for k in ("pw_current", "pw_new", "pw_again"):
                     ss.pop(k, None)
-                flash("Password changed", ":material/lock:")
+                flash("Password changed. You've been signed out on your other devices.", ":material/lock:")
                 st.rerun()
 
 

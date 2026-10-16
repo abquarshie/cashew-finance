@@ -215,6 +215,11 @@ def morning(k, book, now):
 
     food = [f"{name} ({amount})" if amount else name for name, amount in _today_shopping(k, today)]
     named = {f.split(" (")[0] for f in food}
+    for (ing, base), t in k.ran_short(today).items():  # ran out while cooking: needs buying again
+        name = k.names.get(ing, "?")
+        if not t["mismatch"] and name not in named:
+            food.append(f"{name} ({fmt(t['short'], base, k.unit_of.get(ing))})".replace(" pcs)", ")"))
+            named.add(name)
     food += [n for n in k.food_low() if n not in named]
     household = k.supplies_low()
     if food or household:

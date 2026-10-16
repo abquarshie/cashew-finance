@@ -116,6 +116,21 @@ def conn(db_url):
     c.close()
 
 
+@pytest.fixture
+def live_db(monkeypatch, db_url):
+    """The app's own database code (core.db, core.auth, meals.actions) talking to the test database outside a
+    running app: no st.secrets, and the app's caches left alone."""
+    from types import SimpleNamespace
+
+    from core import auth, db
+    from meals import actions
+    monkeypatch.setattr(db, "st", SimpleNamespace(secrets={"DATABASE_URL": db_url}))
+    for module in (db, auth, actions):  # each imports invalidate by name
+        monkeypatch.setattr(module, "invalidate", lambda: None)
+    monkeypatch.setattr(actions, "invalidate_kitchen", lambda: None)
+    return db
+
+
 def q(conn, sql, params=None):
     with conn.cursor() as cur:
         cur.execute(sql, params)

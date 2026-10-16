@@ -107,8 +107,9 @@ def shopping_list(needs, pantry, low_levels=None, prices=None, packs=None):
             to_buy = round(max(n["qty"] - have, 0.0), 3)
         if to_buy <= 0:
             continue
+        reason = n.get("reason") or ("For " + ", ".join(n["for"]) if n["for"] else "")
         out.append({"ingredient_id": ing, "base": base, "need": n["qty"], "have": have, "to_buy": to_buy,
-                    "reason": "For " + ", ".join(n["for"]) if n["for"] else "", "low": False})
+                    "reason": reason, "low": False})
     listed = {(r["ingredient_id"], r["base"]) for r in out}
     for (ing, base), level in (low_levels or {}).items():
         if level is None or (ing, base) in listed:

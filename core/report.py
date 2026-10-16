@@ -62,7 +62,7 @@ def monthly(book, kitchen=None, today=None):
             out.append(escape(f"{s['name']}: {gh(s['spent'])} of {gh(s['limit'])} {mark}"))
 
     spent = book.month_expenses(period)
-    if len(spent):
+    if len(spent) and exp > 0:  # every expense at 0 would otherwise divide by zero below
         top = spent.groupby("group")["amount"].sum().sort_values(ascending=False).head(3)
         out += ["", "<b>Where most of it went</b>"]
         out += [escape(f"{g}: {gh(v)} ({v / exp * 100:.0f}%)") for g, v in top.items()]

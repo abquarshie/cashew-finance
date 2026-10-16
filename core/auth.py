@@ -107,6 +107,7 @@ def register(username, display_name, password, code=None):
         return None, username_problem(username)
     if password_problem(password, username):
         return None, password_problem(password, username)
+    hashed = hash_password(password)  # slow on purpose, so done before the users table is locked
 
     def work(conn):
         with conn.cursor() as cur:
@@ -125,7 +126,7 @@ def register(username, display_name, password, code=None):
             cur.execute(
                 "INSERT INTO users (username, display_name, password_hash, is_owner, last_login) "
                 "VALUES (%s, %s, %s, %s, now()) RETURNING id, username, display_name, is_owner",
-                (username, display_name, hash_password(password), first),
+                (username, display_name, hashed, first),
             )
             return _public(cur.fetchone()), None
 
@@ -165,14 +166,19 @@ def sign_in(username, password):
     return _public((uid, uname, name, owner)), None
 
 
-def change_password(user_id, current, new):
+def change_password(user_id, current, new, keep_token=None):
+    """Change your own password. Every other device you're signed in on is signed out (a lost phone stops
+    working); the browser making the change, whose token is keep_token, stays signed in."""
     row = fetch_one("SELECT username, password_hash FROM users WHERE id = %s", (user_id,))
     if not row or not check_password(current, row[1]):
         return "Your current password isn't right."
     problem = password_problem(new, row[0])
     if problem:
         return problem
-    run_many([("UPDATE users SET password_hash = %s WHERE id = %s", (hash_password(new), user_id))], refresh=False)
+    run_many([
+        ("UPDATE users SET password_hash = %s WHERE id = %s", (hash_password(new), user_id)),
+        ("DELETE FROM sessions WHERE user_id = %s AND token_hash <> %s", (user_id, _token_hash(keep_token))),
+    ])  # refresh, so the other open browsers notice and sign out
     return None
 
 

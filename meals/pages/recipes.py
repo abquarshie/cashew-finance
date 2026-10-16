@@ -162,8 +162,9 @@ def _editor(k):
         unit = row["Unit"] if isinstance(row["Unit"], str) and row["Unit"] else k.unit_of[id_of[ing]]
         pack = k.pack(id_of[ing])
         if base_of(unit) != base_of(k.unit_of[id_of[ing]]) and not (pack and unit == pack[0]) and unit not in alts(pack):
-            field_msg(f"{ing} is usually counted in {k.unit_of[id_of[ing]]}; {unit} won't add up with it "
-                      "on the shopping list.", "warn")
+            field_msg(f"{ing} is counted in {k.unit_of[id_of[ing]]} in the pantry, and {unit} doesn't convert to "
+                      "that: cooking this recipe can't take it off the pantry, and it won't add up on the shopping "
+                      f"list. Use {k.unit_of[id_of[ing]]} here.", "warn")
         clean.append((id_of[ing], float(qty), unit))
     dupes = {k.names[i] for i, _, _ in clean if sum(1 for j, _, _ in clean if j == i) > 1}
     if dupes:

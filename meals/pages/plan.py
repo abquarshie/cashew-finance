@@ -36,14 +36,21 @@ def _toggle(entry_id, kind, status):
         short = actions.mark_cooked(entry_id, k.household)
         e = next((x for x in k.plan if x["id"] == entry_id), None)
         left = max(e["qty"] - min(k.household, e["qty"]), 0) if e else 0
-        msg = "Cooked" + (f". {left:g} portion{'s' if left != 1 else ''} put in the fridge." if left else ".")
+        keeps = k.recipes.get(e["recipe_id"], {}).get("keeps_days", 3) if e else 3
+        if left and e and e["day"] + timedelta(days=keeps) < date.today():
+            msg = "Cooked. It was too long ago for leftovers to still be good, so nothing went into the fridge."
+        else:
+            msg = "Cooked" + (f". {left:g} portion{'s' if left != 1 else ''} put in the fridge." if left else ".")
         flash(msg, ":material/skillet:")
         if short:
             flash("Not in the pantry, so not taken off: " + actions.describe_short(short, k.names, k.unit_of) +
-                  ". Update the pantry if you had them.", ":material/warning:")
+                  ". They're on the shopping list now; update the pantry if you had them.", ":material/warning:")
     else:
-        actions.mark_done(entry_id)
+        short = actions.mark_done(entry_id)
         flash("Ticked off", ":material/check:")
+        if short:
+            flash("Not in the pantry, so not taken off: " + actions.describe_short(short, k.names, k.unit_of) +
+                  ". It's on the shopping list now; update the pantry if you had it.", ":material/warning:")
 
 
 def _toggle_meal(ids, done):
@@ -62,7 +69,7 @@ def _toggle_meal(ids, done):
     flash(("Ticked off: " + "; ".join(bits) + ".") if bits else "Ticked off.", ":material/skillet:")
     if out["short"]:
         flash("Not in the pantry, so not taken off: " + actions.describe_short(out["short"], k.names, k.unit_of) +
-              ". Update the pantry if you had them.", ":material/warning:")
+              ". They're on the shopping list now; update the pantry if you had them.", ":material/warning:")
 
 
 def _from_fridge(entry_id):
