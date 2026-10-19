@@ -6,9 +6,8 @@ shows exactly the same thing on Home, on the meal plan and in the preview.
 from datetime import date, timedelta
 from html import escape
 
-from meals.logic import (GUARD_JOKE, OPEN, SLOTS, bought_cost, budget_guard, food_budget, meal_status,
+from meals.logic import (OPEN, SLOTS, bought_cost, budget_guard, food_budget, meal_status,
                           shopping_list, shortfall)
-from meals.quips import with_joke
 from meals.units import base_of, fmt, plural, to_base
 
 ICON = {"warn": "⚠️", "info": "•", "ok": "✅"}
@@ -72,7 +71,7 @@ def today_summary(k, now):
     """What to cook today and whether it's all in, plus the one reminder that matters most.
 
     Returns {"day", "meals": [(slot, name, status, label)], "note": (tone, text) or None,
-             "notes": every reminder for today and tomorrow (or the cheerful line when there are none),
+             "notes": every reminder for today and tomorrow (or one plain line when there are none),
              "reminders": only the real reminders}."""
     today = now.date()
     meals = []
@@ -85,9 +84,9 @@ def today_summary(k, now):
     if notes:
         note = notes[0]
     elif not meals:
-        note = ("info", with_joke("nothing_planned", "Nothing planned for today yet.", today, "", k.fun))
+        note = ("info", "Nothing planned for today yet.")
     elif all(m[2] in ("ready", "leftovers", "done", "bought") for m in meals):
-        note = ("ok", with_joke("all_ready", "Everything for today's meals is in.", today, "", k.fun))
+        note = ("ok", "Everything for today's meals is in.")
     else:
         note = None
     return {"day": today, "meals": meals, "note": note, "notes": notes or ([note] if note else []), "reminders": notes}
@@ -132,7 +131,7 @@ def guard(k, book, today, kind="food"):
     if not g:
         return None
     tone = "hint" if g["level"] == "75" else "warn"
-    return tone, with_joke(GUARD_JOKE[g["level"]], g["text"], today, kind, k.fun, what=kind)
+    return tone, g["text"]
 
 
 def _menu(k, day):
@@ -217,7 +216,7 @@ def morning(k, book, now):
             meals.append(f"• {slot}: {escape(k.meal_name(parts))} {STATUS_ICON[status]}{escape(note)}")
     out += meals or ["• Nothing planned yet."]
 
-    urgent = k.urgent(now)
+    urgent = k.urgent(now, buying=True)
     if urgent:
         out += ["", "⚠️ <b>Heads-up</b>"] + [f"• {escape(text)}" for text in urgent[:4]]
 
@@ -252,10 +251,8 @@ def stocktake(k, now):
     if not items:
         return None
     out = ["🧮 <b>Sunday stock check</b>", "",
-           "These were used most this week. Check how much is really left, and fix any that are off in "
-           "Cashew → Pantry / Inventory:", ""]
+           "Used most this week. Count them and fix any that are off in Pantry / Inventory:", ""]
     out += [f"• {escape(name)}: {escape(have)}" for name, have in items]
-    out += ["", "Two minutes now keeps the shopping list and the morning message right."]
     return "\n".join(out)
 
 

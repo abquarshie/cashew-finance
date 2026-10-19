@@ -72,6 +72,6 @@ def _features():
             new = st.toggle(label, value=on, key=f"feature_{name}", help=help_text)
             st.caption(help_text)
             if new != on:
-                set_feature(name, new)  # refreshes the kitchen too (for "fun" reminders)
+                set_feature(name, new)
                 flash(f"{label} switched {'on' if new else 'off'}", ":material/toggle_on:")
                 st.rerun()

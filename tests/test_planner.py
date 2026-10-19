@@ -56,9 +56,8 @@ def test_the_plan_warns_about_a_big_pot_and_one_tap_makes_it_smaller(live_db, co
         k = Kitchen(_load(conn))
         w = next(p for p in k.pot_warnings() if p["entry_id"] == e)
         when = date.today() + timedelta(days=1)
-        assert w["text"] == (f"Test pepper soup on {when:%a %d}: 10 portions cooked, but only 2 portions eaten before "
-                             f"it goes off on {when + timedelta(days=3):%a %d}, so 8 portions would be thrown away. "
-                             "Cook 2 portions, or plan it for more meals that week.")
+        assert w["text"] == (f"Test pepper soup on {when:%a %d}: cook 2 portions, not 10 portions. "
+                             f"The rest would go off by {when + timedelta(days=3):%a %d}.")
         assert any(w["text"] == t for _, t in k.notes()), "cooked tomorrow: a reminder on the plan and in the morning"
         assert w["text"] in k.urgent()
         set_plan_qty(e, w["suggest"])

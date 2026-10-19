@@ -526,7 +526,6 @@ FEATURES = {
     "kitchen": ("Kitchen", "Meal plan, recipes, fridge, pantry and shopping list"),
     "goals": ("Savings goals", "Saving towards school fees, rent, a car and so on"),
     "reminders": ("Phone reminders", "The morning and evening Telegram messages"),
-    "fun": ("Fun reminders", "A joke in front of each kitchen reminder. Off means plain reminders"),
 }
 
 

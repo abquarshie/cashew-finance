@@ -80,9 +80,7 @@ def test_what_the_pantry_didnt_have_is_flagged_until_it_is_bought(live_db, conn,
 
     text = morning(k, None, datetime.now())
     lines = text.split("\n")
-    heads = lines[lines.index("⚠️ <b>Heads-up</b>") + 1:]
-    assert any("Ran out while cooking (Kokonte + Groundnut soup)" in x and "200 g Groundnut paste" in x
-               for x in heads), text
+    assert not any("Ran out" in x for x in lines), "listed once, on the shopping line, not again as a heads-up"
     food = next(x for x in lines if x.startswith("• Pantry / Food: "))
     assert "Groundnut paste (200 g)" in food, "it goes on the morning shopping line"
     assert any("Ran out" in t for _, t in k.notes()), "and on the meal plan's reminders"
@@ -136,9 +134,9 @@ def test_a_recipe_in_the_wrong_unit_is_named_not_silently_skipped(live_db, conn,
         assert _stock(conn, kp, "ml") == 2500, "untouched: grams can't come off a stock kept in cups"
         k = _kitchen(conn)
         assert k.ran_short()[(kp, "g")]["mismatch"] == "ml"
-        note = next(t for _, t in k.notes() if "couldn't be taken off" in t)
-        assert note == ("Kokonte powder couldn't be taken off the pantry: the recipe measures it in g, but the "
-                        "pantry counts it in cups. Change the unit in the recipe.")
+        note = next(t for _, t in k.notes() if "wasn't taken off" in t)
+        assert note == ("Kokonte powder wasn't taken off the pantry: the recipe uses g, the pantry uses cups. "
+                        "Fix the unit in the recipe.")
         from meals.pages.shopping import ran_out_needs
         assert (kp, "g") not in ran_out_needs(k, k.window()[0]), "there's plenty in the pantry: nothing to buy"
     finally:

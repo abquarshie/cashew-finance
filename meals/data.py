@@ -58,7 +58,7 @@ QUERIES = {
               "SELECT t.id, t.date, t.account, t.total, t.created_by, t.shop, count(i.id) AS items "
               "FROM meals.trips t LEFT JOIN meals.trip_items i ON i.trip_id = t.id "
               "GROUP BY t.id ORDER BY t.date DESC, t.id DESC LIMIT 20"),
-    "settings": (["key", "value"], "SELECT key, value FROM app_meta WHERE key LIKE 'meals_%' OR key = 'feature_fun'"),
+    "settings": (["key", "value"], "SELECT key, value FROM app_meta WHERE key LIKE 'meals_%'"),
     # what each item cost per base unit on every trip in the last year, and where (for price trends)
     "history": (["ingredient_id", "unit", "qty", "price", "date", "shop", "trip_id"],
                 "SELECT i.ingredient_id, i.unit, i.qty, i.price, t.date, t.shop, t.id AS trip_id FROM meals.trip_items i "
@@ -210,7 +210,6 @@ class Kitchen:
                 self.slot_people[slot] = max(int(settings.get(slot_key(slot), self.household)), 0)
             except ValueError:
                 self.slot_people[slot] = self.household
-        self.fun = settings.get("feature_fun", "on") != "off"  # jokes in the reminders
         self._alloc = {}
 
     # ---- the next two weeks, worked out once per data change -----------------------------
@@ -254,10 +253,8 @@ class Kitchen:
             name = self.recipes.get(p["recipe_id"], {}).get("name", "?")
             n = suggested_pot(p)
             p.update(name=name, suggest=n, text=(
-                f"{name} on {p['day']:%a %d}: {fmt_portions(p['cooked'])} cooked, but only "
-                f"{fmt_portions(p['eaten'])} eaten before it goes off on {p['eat_by']:%a %d}, so "
-                f"{fmt_portions(p['left'])} would be thrown away. Cook {fmt_portions(n)}, or plan it for more meals "
-                "that week."))
+                f"{name} on {p['day']:%a %d}: cook {fmt_portions(n)}, not {fmt_portions(p['cooked'])}. "
+                f"The rest would go off by {p['eat_by']:%a %d}."))
             out.append(p)
         return out
 
@@ -303,16 +300,13 @@ class Kitchen:
         if plain:
             items = ", ".join(f"{fmt(t['short'], base, self.unit_of.get(ing))} {self.names[ing]}".replace(" pcs", "")
                               for ing, base, t in plain)
-            meals = ", ".join(dict.fromkeys(m for _, _, t in plain for m in t["for"]))
-            notes.append(("warn", f"Ran out while cooking ({meals}): {items} short. Buy more, or correct the "
-                                  "pantry if you still have some.", "ran_short"))
+            notes.append(("warn", f"Ran out while cooking: {items}. Buy more or fix the pantry count.", "ran_short"))
         for (ing, base), t in short.items():
             if t["mismatch"]:
                 usual = self.unit_of.get(ing)
                 kept = usual if base_of(usual) == t["mismatch"] else t["mismatch"]
-                notes.append(("warn", f"{self.names[ing]} couldn't be taken off the pantry: the recipe measures it "
-                                      f"in {base}, but the pantry counts it in {plural(kept)}. Change the unit in "
-                                      "the recipe.", "ran_short"))
+                notes.append(("warn", f"{self.names[ing]} wasn't taken off the pantry: the recipe uses {base}, the "
+                                      f"pantry uses {plural(kept)}. Fix the unit in the recipe.", "ran_short"))
         return notes
 
     def _extra_notes(self, today):
@@ -323,25 +317,26 @@ class Kitchen:
         return self._ran_short_notes(today) + soon
 
     def notes(self, now=None):
-        """Today's and tomorrow's reminders, with jokes if they're switched on."""
+        """Today's and tomorrow's reminders."""
         now = now or datetime.now()
         today = now.date()
         food_low = {key: v for key, v in self.low_levels.items() if key[0] not in self.supplies}
         out = reminders(now, self.entries(today, today + timedelta(days=1)), self.recipes, self.items, self.pantry,
                         self.fridge, self.names, self.slot_people, packs=self.packs, alloc=self.allocation(today),
-                        fun=self.fun, low_levels=food_low, usual=self.unit_of)
+                        low_levels=food_low, usual=self.unit_of)
         return [(tone, text) for tone, text, _ in self._extra_notes(today)] + out
 
-    def urgent(self, now=None):
+    def urgent(self, now=None, buying=False):
         """The reminders worth a line in the morning message: prep to start (soak the beans), and fridge food
-        past its date or to eat by today or tomorrow. Plain text, no jokes: [text]."""
+        past its date or to eat by today or tomorrow. Plain text: [text]. buying=True leaves out what ran out while cooking (the message lists it to buy)."""
         now = now or datetime.now()
         today = now.date()
         food_low = {key: v for key, v in self.low_levels.items() if key[0] not in self.supplies}
         notes = reminders(now, self.entries(today, today + timedelta(days=1)), self.recipes, self.items, self.pantry,
                           self.fridge, self.names, self.slot_people, packs=self.packs, alloc=self.allocation(today),
-                          fun=False, low_levels=food_low, usual=self.unit_of, with_kind=True)
-        return ([text for _, text, _ in self._extra_notes(today)]
+                          low_levels=food_low, usual=self.unit_of, with_kind=True)
+        return ([text for _, text, kind in self._extra_notes(today)
+                 if not (buying and kind == "ran_short" and text.startswith("Ran out"))]
                 + [text for _, text, kind in notes if kind in ("prep", "past", "eat_soon")])
 
     def stocktake(self, today=None, days=7, most=10):

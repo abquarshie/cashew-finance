@@ -329,9 +329,6 @@ def budget_guard(limit, spent, planned, what="food"):
     return None
 
 
-GUARD_JOKE = {"75": "budget_75", "90": "budget_90", "will_go_over": "budget_over", "over": "budget_over"}
-
-
 # ---- money --------------------------------------------------------------------------------------
 def cost_of(needs, prices):
     """Estimated cost of a set of needs from remembered prices: (total, ingredients with no price yet)."""
@@ -454,18 +451,16 @@ def meal_time(day, slot):
 
 
 def reminders(now, entries, recipes, items, pantry, fridge, names, household, low_portions=1, packs=None,
-              alloc=None, fun=False, low_levels=None, usual=None, with_kind=False):
+              alloc=None, low_levels=None, usual=None, with_kind=False):
     """Things that affect cooking in the next day or so, most urgent first.
 
     entries: plan entries for today and tomorrow. fridge: batches with recipe_id, label, portions, eat_by.
     names: {ingredient_id: name}. alloc: allocate()'s result, if already worked out.
-    fun: put a joke in front of each reminder (see quips.py). low_levels: {(ing, base): warn level}.
+    low_levels: {(ing, base): warn level}.
     usual: {ingredient_id: its own unit}, so rice counted in cups is listed as "3 cups", not "750 ml".
     Returns [(tone, text)] where tone is 'warn', 'info' or 'ok'; with_kind=True adds what each one is about:
     [(tone, text, kind)], kind being prep, leftovers, pickup, missing, past, eat_soon, low_portions or low_stock.
     """
-    from meals.quips import with_joke
-
     today = now.date()
     out = []
     open_entries = [e for e in entries if e["status"] == OPEN and e["day"] >= today]
@@ -483,23 +478,24 @@ def reminders(now, entries, recipes, items, pantry, fridge, names, household, lo
         if start <= now + timedelta(hours=12) and now < at:
             when = "now" if start <= now else f"by {start:%a %H:%M}"
             day_word = "today's" if e["day"] == today else "tomorrow's"
-            text = f"{r['prep_note']} {when}, for {day_word} {e['slot'].lower()} ({r['name']})."
-            out.append(("warn" if start <= now else "info",
-                        with_joke("prep", text, today, e.get("id"), fun, dish=r["name"].lower()), "prep"))
+            text = f"{r['prep_note']} {when} for {day_word} {e['slot'].lower()} ({r['name']})."
+            out.append(("warn" if start <= now else "info", text, "prep"))
 
     # leftovers in the fridge that cover a planned meal
     in_fridge = defaultdict(float)
     for b in fridge:
         if b.get("recipe_id") and b["eat_by"] >= today:
             in_fridge[b["recipe_id"]] += float(b["portions"])
+    # one line per day, each dish named once
+    from_fridge = defaultdict(list)
     for e in sorted(open_entries, key=_when):
         if status.get(_key(e), {}).get("status") == "leftovers" and in_fridge.get(e["recipe_id"]):
-            r = recipes[e["recipe_id"]]
-            day_word = "Today's" if e["day"] == today else "Tomorrow's"
-            text = (f"{day_word} {e['slot'].lower()}: {in_fridge[e['recipe_id']]:g} portions of {r['name']} "
-                    "are already in the fridge, no need to cook.")
-            joke = with_joke("leftovers", text, today, e.get("id"), fun, dish=r["name"].lower())
-            out.append(("ok", joke, "leftovers"))
+            name = recipes[e["recipe_id"]]["name"]
+            if name not in from_fridge[e["day"]]:
+                from_fridge[e["day"]].append(name)
+    for day, dishes in sorted(from_fridge.items()):
+        day_word = "Today" if day == today else "Tomorrow"
+        out.append(("ok", f"{day_word}, from the fridge: {', '.join(dishes)}. No cooking needed.", "leftovers"))
 
     # bought food to pick up
     for e in sorted(open_entries, key=_when):
@@ -514,15 +510,12 @@ def reminders(now, entries, recipes, items, pantry, fridge, names, household, lo
         day_word = "today's" if e["day"] == today else "tomorrow's"
         text = (f"Pick up {frac(e['qty'])} {plural(unit, float(e['qty']))} of {name}{where} for {day_word} "
                 f"{e['slot'].lower()}{cost}.")
-        out.append(("info", with_joke("pickup", text, today, e.get("id"), fun, dish=name.lower()), "pickup"))
+        out.append(("info", text, "pickup"))
 
     # ingredients missing for today's and tomorrow's cooking, after the stock is shared out
     missing = defaultdict(float)
-    short_dish = None
     for e in sorted(open_entries, key=_when):
         lines = status.get(_key(e), {}).get("missing", [])
-        if lines and short_dish is None:
-            short_dish = (recipes.get(e.get("recipe_id"), {}).get("name") or names.get(e.get("ingredient_id")) or "")
         for ing, base, q in lines:
             missing[(ing, base)] += q
     if missing:
@@ -531,10 +524,7 @@ def reminders(now, entries, recipes, items, pantry, fridge, names, household, lo
         listed = ", ".join(f"{fmt(q, base, usual.get(ing))} {names.get(ing, '?')}".replace(" pcs", "")
                            for (ing, base), q in rows[:6])
         more = f" and {len(rows) - 6} more" if len(rows) > 6 else ""
-        first_item = names.get(rows[0][0][0], "").lower()
-        fields = {k: v for k, v in (("dish", (short_dish or "").lower()), ("item", first_item)) if v}
-        text = f"Buy before cooking: {listed}{more}."
-        out.append(("warn", with_joke("missing", text, today, "", fun, **fields), "missing"))
+        out.append(("warn", f"Buy before cooking: {listed}{more}.", "missing"))
 
     # fridge food going off or running low
     for b in sorted(fridge, key=lambda b: b["eat_by"]):
@@ -542,16 +532,14 @@ def reminders(now, entries, recipes, items, pantry, fridge, names, household, lo
         unit = b.get("unit") or "portion"
         if flag == "past":
             text = f"{b['label']} in the fridge was due by {b['eat_by']:%a %d %b}. Check it before eating."
-            out.append(("warn", with_joke("past", text, today, b.get("id"), fun), "past"))
+            out.append(("warn", text, "past"))
         elif flag == "soon":
             when = "today" if b["eat_by"] == today else "tomorrow"
             text = f"Eat the {frac(b['portions'])} {plural(unit, float(b['portions']))} of {b['label']} by {when}."
-            joke = with_joke("eat_soon", text, today, b.get("id"), fun, dish=str(b["label"]).lower())
-            out.append(("warn", joke, "eat_soon"))
+            out.append(("warn", text, "eat_soon"))
         elif flag == "low":
-            text = (f"Only {frac(b['portions'])} {plural(unit, float(b['portions']))} of {b['label']} "
-                    "left in the fridge.")
-            out.append(("info", with_joke("low_portions", text, today, b.get("id"), fun), "low_portions"))
+            text = f"Only {frac(b['portions'])} {plural(unit, float(b['portions']))} of {b['label']} left in the fridge."
+            out.append(("info", text, "low_portions"))
 
     # staples running low (only when the caller asks)
     if low_levels:
@@ -559,7 +547,7 @@ def reminders(now, entries, recipes, items, pantry, fridge, names, household, lo
                      if level is not None and float(pantry.get((ing, base), 0)) <= float(level))
         if low:
             text = "Running low: " + ", ".join(low[:6]) + (f" and {len(low) - 6} more" if len(low) > 6 else "") + "."
-            out.append(("info", with_joke("low_stock", text, today, "", fun), "low_stock"))
+            out.append(("info", text, "low_stock"))
     order = {"warn": 0, "info": 1, "ok": 2}
     out = sorted(out, key=lambda x: order[x[0]])
     return out if with_kind else [(tone, text) for tone, text, _ in out]

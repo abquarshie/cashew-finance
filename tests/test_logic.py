@@ -245,16 +245,30 @@ def test_cooking_reminders():
     e = plan({"day": D + timedelta(days=1), "slot": "Breakfast", "recipe_id": 2, "qty": 4})
     notes = ml.reminders(datetime(2026, 10, 12, 22, 0), e, RECIPES, ITEMS, {}, [], {10: "onions", 11: "rice", 12: "oil"}, 4)
     texts = " | ".join(t for _, t in notes)
-    assert "Soak the beans now, for tomorrow's breakfast (Red red)" in texts
+    assert "Soak the beans now for tomorrow's breakfast (Red red)." in texts
     assert "Buy before cooking: 3 onions, 500 g rice, 500 ml oil" in texts
     fridge = [{"recipe_id": 2, "label": "Red red", "portions": 4, "eat_by": D + timedelta(days=1)}]
     notes = ml.reminders(datetime(2026, 10, 12, 8, 0), e, RECIPES, ITEMS, {}, fridge, {}, 4)
     texts = " | ".join(t for _, t in notes)
-    assert "already in the fridge, no need to cook" in texts and "Buy before cooking" not in texts
+    assert "Tomorrow, from the fridge: Red red. No cooking needed." in texts and "Buy before cooking" not in texts
     assert "Eat the 4 portions of Red red by tomorrow" in texts
 
 
-# ---- two-week planning: sharing out the stock, fractions, jokes and the budget guard ------------
+def test_fridge_meals_make_one_short_line_per_day():
+    from datetime import datetime
+    day = D + timedelta(days=1)
+    e = plan({"id": 1, "day": day, "slot": "Breakfast", "recipe_id": 2, "qty": 2},
+             {"id": 2, "day": day, "slot": "Lunch", "recipe_id": 1, "qty": 2},
+             {"id": 3, "day": day, "slot": "Lunch", "recipe_id": 2, "qty": 2},
+             {"id": 4, "day": day, "slot": "Supper", "recipe_id": 2, "qty": 2})
+    fridge = [{"recipe_id": 1, "label": "Jollof", "portions": 4, "eat_by": D + timedelta(days=4)},
+              {"recipe_id": 2, "label": "Red red", "portions": 8, "eat_by": D + timedelta(days=4)}]
+    notes = ml.reminders(datetime(2026, 10, 12, 20, 0), e, RECIPES, ITEMS, {}, fridge, {}, 2)
+    lines = [t for _, t in notes if "from the fridge" in t]
+    assert lines == ["Tomorrow, from the fridge: Red red, Jollof. No cooking needed."], notes
+
+
+# ---- two-week planning: sharing out the stock, fractions and the budget guard ------------
 def test_two_meals_cant_both_count_the_same_onions():
     e = plan({"id": 1, "day": D, "slot": "Lunch", "recipe_id": 1, "qty": 4},
              {"id": 2, "day": D + timedelta(days=1), "slot": "Supper", "recipe_id": 2, "qty": 4})
@@ -306,18 +320,6 @@ def test_shopping_amounts_you_can_actually_buy():
     assert got == {10: 6, 11: 40, 12: 1650}
 
 
-def test_jokes_stay_the_same_all_day_and_keep_the_facts():
-    from meals.quips import joke, with_joke
-    assert joke("missing", D) == joke("missing", D), "no change on every redraw"
-    text = with_joke("missing", "Buy before cooking: 3 onions.", D)
-    assert text.endswith("Buy before cooking: 3 onions.") and len(text) > 30
-    assert with_joke("missing", "Buy 3 onions.", D, on=False) == "Buy 3 onions."
-    from datetime import datetime
-    e = plan({"day": D + timedelta(days=1), "slot": "Breakfast", "recipe_id": 2, "qty": 4})
-    notes = ml.reminders(datetime(2026, 10, 12, 22, 0), e, RECIPES, ITEMS, {}, [], {10: "onions"}, 4, fun=True)
-    assert any("Soak the beans now" in t and not t.startswith("Soak") for _, t in notes)
-
-
 def test_repeating_last_week_fills_both_weeks_once():
     old = plan({"day": D - timedelta(days=7), "slot": "Supper", "recipe_id": 1, "qty": 2.5},
                {"day": D - timedelta(days=6), "slot": "Lunch", "recipe_id": 2, "qty": 4},
@@ -328,20 +330,6 @@ def test_repeating_last_week_fills_both_weeks_once():
     assert (D + timedelta(days=1), "Lunch") not in got, "a planned meal is left alone"
     assert got[(D + timedelta(days=8), "Lunch")] == 4, "...and repeated a week later"
     assert ml.repeat_plan(old + plan(*new), D) == [], "nothing left to copy afterwards"
-
-
-def test_jokes_name_whats_actually_short():
-    from datetime import datetime
-    from meals.quips import LINES, joke
-    for kind in LINES:  # every line works with the names given, and none is left with a {placeholder}
-        for i in range(30):
-            j = joke(kind, D + timedelta(days=i), dish="light soup", item="tomatoes", what="food")
-            assert j and "{" not in j
-    assert "{" not in joke("missing", D), "lines that need a name are skipped when there isn't one"
-    e = plan({"id": 1, "day": D, "slot": "Supper", "recipe_id": 2, "qty": 4})
-    notes = ml.reminders(datetime(2026, 10, 12, 8, 0), e, RECIPES, ITEMS, {}, [], {10: "Onions"}, 4, fun=True)
-    buy = next(t for _, t in notes if "Buy before cooking" in t)
-    assert "jollof" not in buy.lower(), "the joke never names a dish that isn't short"
 
 
 def test_month_so_far_compares_the_same_days(book_now):
@@ -359,8 +347,6 @@ def test_household_budget_words():
     g = ml.budget_guard(300, 280, 50, what="household")
     assert g["level"] == "will_go_over" and g["text"].startswith("The planned shopping") and "household spending" in g["text"]
     assert "swapping a dish" not in g["text"], "no dish to swap for bleach"
-    from meals.quips import joke
-    assert "food" not in joke("budget_75", D, "household", what="household")
 
 
 def test_bought_food_needs_no_ingredients():
